@@ -121,7 +121,7 @@
   .my-cards-row{display:flex;align-items:center;gap:16px;}
   .my-cards-row .card{width:56px;height:78px;font-size:20px;}
   .my-cards-row .card .suit{font-size:19px;}
-  .player-tag{display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.28);border:1px solid var(--panel-line);padding:6px 10px 6px 6px;border-radius:30px;}
+  .player-tag{position:relative;display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.28);border:1px solid var(--panel-line);padding:6px 10px 6px 6px;border-radius:30px;}
   .player-tag .avatar{width:26px;height:26px;border-radius:50%;background:linear-gradient(160deg,#3a5c4e,#1b332a);border:1px solid var(--gold);
     display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--gold-bright);font-family:'Fraunces',serif;}
   .player-tag .name{font-size:13px;font-weight:600;}
@@ -166,6 +166,57 @@
     .card{width:38px;height:54px;font-size:14px;}
     .my-cards-row .card{width:48px;height:68px;font-size:17px;}
   }
+
+  /* ---------- Animations ---------- */
+  @keyframes dealIn{
+    0%{ opacity:0; transform: translateY(-16px) scale(.7) rotate(-6deg); }
+    60%{ opacity:1; }
+    100%{ opacity:1; transform: translateY(0) scale(1) rotate(0deg); }
+  }
+  .card.deal-in{ animation: dealIn .38s cubic-bezier(.2,.8,.3,1.2) both; }
+
+  .opp-seat, .player-tag{ transition: opacity .4s ease, border-color .25s ease, box-shadow .25s ease; }
+
+  @keyframes turnPulse{
+    0%,100%{ box-shadow:0 0 0 3px rgba(232,200,115,.18); }
+    50%{ box-shadow:0 0 0 6px rgba(232,200,115,.30); }
+  }
+  .opp-seat.active-turn, .player-tag.active-turn{ animation: turnPulse 1.4s ease-in-out infinite; }
+
+  @keyframes potBump{
+    0%{ transform: scale(1); }
+    35%{ transform: scale(1.14); }
+    100%{ transform: scale(1); }
+  }
+  .pot-badge.pot-bump{ animation: potBump .35s ease; }
+
+  .action-bubble{
+    position:absolute; top:-28px; left:50%; transform:translateX(-50%);
+    background:var(--ink); border:1px solid var(--gold); color:var(--gold-bright);
+    font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:600;
+    padding:4px 10px; border-radius:12px; white-space:nowrap; pointer-events:none; z-index:6;
+    animation: bubbleFloat 1.5s ease forwards;
+  }
+  @keyframes bubbleFloat{
+    0%{ opacity:0; transform: translate(-50%,6px) scale(.9); }
+    15%{ opacity:1; transform: translate(-50%,-4px) scale(1); }
+    75%{ opacity:1; transform: translate(-50%,-16px) scale(1); }
+    100%{ opacity:0; transform: translate(-50%,-28px) scale(.95); }
+  }
+
+  /* Winning-hand combo visualization */
+  .winning-combo-block{ margin-bottom:18px; }
+  .wc-label{ font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:.05em; color:var(--gold-bright);
+    text-transform:uppercase; margin-bottom:10px; }
+  .combo-cards-row{ position:relative; display:flex; gap:10px; justify-content:center; padding:6px 0 4px; }
+  .combo-lines-svg{ position:absolute; top:0; left:0; pointer-events:none; overflow:visible; }
+  .combo-line-path{ fill:none; stroke:var(--gold-bright); stroke-width:2; stroke-dasharray:6 5; opacity:.8; animation: comboDash 1s linear infinite; }
+  @keyframes comboDash{ to{ stroke-dashoffset:-22; } }
+  .combo-card{
+    box-shadow:0 0 0 3px var(--gold-bright), 0 6px 14px rgba(0,0,0,.45);
+    animation: comboPulse 1.8s ease-in-out infinite;
+  }
+  @keyframes comboPulse{ 0%,100%{ transform:translateY(0); } 50%{ transform:translateY(-3px); } }
 </style>
 </head>
 <body>
@@ -319,6 +370,7 @@
   <div class="sd-card">
     <h2 id="sd-title">Riley wins</h2>
     <div id="sd-pot-lines"></div>
+    <div id="sd-win-combos"></div>
     <div class="sd-hands" id="sd-hands"></div>
     <button class="btn gold" onclick="closeShowdown()">Continue</button>
   </div>
@@ -367,14 +419,14 @@ function evaluate5(cards){
 }
 function cmpScore(a,b){ for(let i=0;i<Math.max(a.length,b.length);i++){ const x=a[i]||0,y=b[i]||0; if(x!==y) return x-y; } return 0; }
 function best5of7(cards7){
-  let best=null;
+  let best=null, bestCards=null;
   const n=cards7.length;
   for(let a=0;a<n;a++) for(let b=a+1;b<n;b++) for(let c=b+1;c<n;c++) for(let d=c+1;d<n;d++) for(let e=d+1;e<n;e++){
     const combo=[cards7[a],cards7[b],cards7[c],cards7[d],cards7[e]];
     const score=evaluate5(combo);
-    if(!best || cmpScore(score,best)>0) best=score;
+    if(!best || cmpScore(score,best)>0){ best=score; bestCards=combo; }
   }
-  return {score:best};
+  return {score:best, cards:bestCards};
 }
 function handName(score){ return HAND_NAMES[score[0]]; }
 
@@ -692,6 +744,8 @@ function startHand(){
   game.acted = new Array(game.n).fill(false);
   game.handSeats = handSeats;
   game.showdown = null;
+  game.actionSeq = 0;
+  game.lastAction = null;
   game.log = `Hand #${game.handNum} — shuffling up`;
 
   game.dealerSeat = game.handNum===1 ? handSeats[0] : nextSeatInSet(game.dealerSeat, handSeats);
@@ -767,12 +821,18 @@ function doShowdown(){
       resultText: `${nameOf(winner)} wins ${totalPot} — everyone else folded`,
       pots: [{amount: totalPot, winners:[winner]}],
       revealSeats: [],
-      handNames: {}
+      handNames: {},
+      handCards: {}
     };
   } else {
     const pots = computeSidePots();
     const handScores = {};
-    notFolded.forEach(s=>{ handScores[s] = best5of7([...game.hole[s], ...game.community]).score; });
+    const handCardsById = {};
+    notFolded.forEach(s=>{
+      const res = best5of7([...game.hole[s], ...game.community]);
+      handScores[s] = res.score;
+      handCardsById[s] = res.cards;
+    });
     const handNamesById = {};
     notFolded.forEach(s=> handNamesById[s] = handName(handScores[s]));
 
@@ -800,7 +860,8 @@ function doShowdown(){
       resultText: lines.join(' · '),
       pots,
       revealSeats: notFolded,
-      handNames: handNamesById
+      handNames: handNamesById,
+      handCards: handCardsById
     };
   }
   broadcastState();
@@ -836,15 +897,21 @@ function applyAction(seat, action, amount){
   if(!game || game.stage==='showdown' || game.stage==='matchover') return;
   if(game.turnSeat !== seat) return;
 
+  function markAction(text){
+    game.actionSeq = (game.actionSeq||0) + 1;
+    game.lastAction = { seq: game.actionSeq, seat, text };
+  }
+
   if(action === 'fold'){
     game.folded[seat] = true; game.acted[seat] = true;
     game.log = `${nameOf(seat)} folds`;
+    markAction('Folds');
     hostAdvanceTurn(); return;
   }
   if(action === 'checkcall'){
     const toCall = game.currentBet - game.betsThisStreet[seat];
-    if(toCall <= 0){ game.acted[seat]=true; game.log = `${nameOf(seat)} checks`; }
-    else{ const callAmt = Math.min(toCall, game.stacks[seat]); postBet(seat, callAmt); game.acted[seat]=true; game.log = `${nameOf(seat)} calls ${callAmt}`; }
+    if(toCall <= 0){ game.acted[seat]=true; game.log = `${nameOf(seat)} checks`; markAction('Checks'); }
+    else{ const callAmt = Math.min(toCall, game.stacks[seat]); postBet(seat, callAmt); game.acted[seat]=true; game.log = `${nameOf(seat)} calls ${callAmt}`; markAction(`Calls ${callAmt}`); }
     hostAdvanceTurn(); return;
   }
   if(action === 'raise'){
@@ -857,8 +924,10 @@ function applyAction(seat, action, amount){
     game.minRaise = Math.max(BIG_BLIND, game.currentBet - prevCurrentBet);
     game.acted[seat] = true;
     seatsInHandNotAllIn().forEach(s=>{ if(s!==seat) game.acted[s]=false; });
-    const verb = game.stacks[seat]===0 ? 'goes all-in for' : 'bets to';
+    const isAllIn = game.stacks[seat]===0;
+    const verb = isAllIn ? 'goes all-in for' : 'bets to';
     game.log = `${nameOf(seat)} ${verb} ${target}`;
+    markAction(isAllIn ? `All-in! ${target}` : `Raises to ${target}`);
     hostAdvanceTurn(); return;
   }
 }
@@ -909,6 +978,7 @@ function buildView(forSeat){
     toCall: Math.max(0, game.currentBet - game.betsThisStreet[forSeat]),
     dealerSeat: game.dealerSeat,
     log: game.log,
+    lastAction: game.lastAction,
     handNum: game.handNum,
     showdown: game.showdown,
     myStack: game.stacks[forSeat],
@@ -1019,19 +1089,36 @@ function renderTable(){
 
   document.getElementById('blind-label').textContent = `${SMALL_BLIND}/${BIG_BLIND}`;
   document.getElementById('stage-pill').textContent = v.stage.charAt(0).toUpperCase()+v.stage.slice(1);
-  document.getElementById('pot-amount').textContent = v.pot;
   document.getElementById('log-line').textContent = v.log || '';
+
+  const potEl = document.getElementById('pot-amount');
+  if(Number(potEl.textContent) !== v.pot){
+    potEl.textContent = v.pot;
+    const badge = potEl.closest('.pot-badge');
+    badge.classList.remove('pot-bump'); void badge.offsetWidth; badge.classList.add('pot-bump');
+  }
+
+  const isNewHand = v.handNum !== lastHandNumForDeal;
+  if(isNewHand) lastCommunityCountForDeal = 0;
 
   const myCardsEl = document.getElementById('my-cards');
   myCardsEl.innerHTML='';
-  if(me.hole){ me.hole.forEach(c=>myCardsEl.appendChild(cardEl(c))); }
-  else{ myCardsEl.appendChild(cardEl(null,{placeholder:true})); myCardsEl.appendChild(cardEl(null,{placeholder:true})); }
+  if(me.hole){
+    me.hole.forEach((c,i)=>{
+      const el = cardEl(c);
+      if(isNewHand){ el.classList.add('deal-in'); el.style.animationDelay = (i*90)+'ms'; }
+      myCardsEl.appendChild(el);
+    });
+  } else {
+    myCardsEl.appendChild(cardEl(null,{placeholder:true})); myCardsEl.appendChild(cardEl(null,{placeholder:true}));
+  }
 
   const oppRow = document.getElementById('opponents-row');
   oppRow.innerHTML = '';
-  opponents.forEach(o=>{
+  opponents.forEach((o,oi)=>{
     const seatDiv = document.createElement('div');
     seatDiv.className = 'opp-seat' + (o.isTurn?' active-turn':'') + (o.folded?' folded':'');
+    seatDiv.dataset.seat = o.seat;
     seatDiv.innerHTML = `
       ${o.isDealer?'<div class="dealer-btn">D</div>':''}
       <div class="avatar">${(o.name[0]||'?').toUpperCase()}</div>
@@ -1041,16 +1128,39 @@ function renderTable(){
       <div class="ocards"></div>
     `;
     const cardsEl = seatDiv.querySelector('.ocards');
-    if(o.hole){ o.hole.forEach(c=>cardsEl.appendChild(cardEl(c,{mini:true}))); }
-    else if(!o.folded){ cardsEl.appendChild(cardEl(null,{back:true,mini:true})); cardsEl.appendChild(cardEl(null,{back:true,mini:true})); }
+    if(o.hole){
+      o.hole.forEach(c=>cardsEl.appendChild(cardEl(c,{mini:true})));
+    } else if(!o.folded){
+      [0,1].forEach(i=>{
+        const el = cardEl(null,{back:true,mini:true});
+        if(isNewHand){ el.classList.add('deal-in'); el.style.animationDelay = ((oi*2+i)*70)+'ms'; }
+        cardsEl.appendChild(el);
+      });
+    }
     oppRow.appendChild(seatDiv);
   });
 
   const commEl = document.getElementById('community-cards');
   commEl.innerHTML='';
   for(let i=0;i<5;i++){
-    if(v.community[i]) commEl.appendChild(cardEl(v.community[i]));
-    else commEl.appendChild(cardEl(null,{placeholder:true}));
+    if(v.community[i]){
+      const el = cardEl(v.community[i]);
+      if(i >= lastCommunityCountForDeal){ el.classList.add('deal-in'); el.style.animationDelay = ((i-lastCommunityCountForDeal)*110)+'ms'; }
+      commEl.appendChild(el);
+    } else {
+      commEl.appendChild(cardEl(null,{placeholder:true}));
+    }
+  }
+  lastCommunityCountForDeal = v.community.length;
+  lastHandNumForDeal = v.handNum;
+
+  // Floating action bubble for whoever just acted
+  if(v.lastAction && v.lastAction.seq !== lastRenderedActionSeq){
+    lastRenderedActionSeq = v.lastAction.seq;
+    let targetEl = (v.lastAction.seat === v.mySeat)
+      ? document.getElementById('me-tag')
+      : oppRow.querySelector(`[data-seat="${v.lastAction.seat}"]`);
+    if(targetEl) spawnActionBubble(targetEl, v.lastAction.text);
   }
 
   const isShowdown = v.stage === 'showdown';
@@ -1081,6 +1191,18 @@ function renderTable(){
   }
 }
 
+let lastHandNumForDeal = null;
+let lastCommunityCountForDeal = 0;
+let lastRenderedActionSeq = null;
+
+function spawnActionBubble(anchorEl, text){
+  const bubble = document.createElement('div');
+  bubble.className = 'action-bubble';
+  bubble.textContent = text;
+  anchorEl.appendChild(bubble);
+  setTimeout(()=>{ bubble.remove(); }, 1600);
+}
+
 function allEliminatedExceptOne(v){
   return v.seats.filter(s=>s.stack>0).length <= 1;
 }
@@ -1098,6 +1220,20 @@ function showShowdownOverlay(v){
     line.textContent = 'Match over!';
     potLinesEl.appendChild(line);
   }
+
+  // Winning-hand visualization: the actual 5 cards that made the hand, connected with lines.
+  const winCombosEl = document.getElementById('sd-win-combos');
+  winCombosEl.innerHTML = '';
+  const winnersWithCards = [];
+  (v.showdown.pots||[]).forEach(p=>(p.winners||[]).forEach(w=>{
+    if(v.showdown.handCards && v.showdown.handCards[w] && !winnersWithCards.includes(w)) winnersWithCards.push(w);
+  }));
+  winnersWithCards.forEach(w=>{
+    const seatObj = v.seats.find(s=>s.seat===w);
+    const name = seatObj && seatObj.isMe ? 'You' : (seatObj ? seatObj.name : '');
+    const handLabel = (v.showdown.handNames && v.showdown.handNames[w]) || '';
+    winCombosEl.appendChild(buildWinningComboBlock(name, handLabel, v.showdown.handCards[w]));
+  });
 
   const handsEl = document.getElementById('sd-hands');
   handsEl.innerHTML = '';
@@ -1123,6 +1259,52 @@ function showShowdownOverlay(v){
 
   document.getElementById('showdown-overlay').classList.add('open');
 }
+
+function buildWinningComboBlock(name, handLabel, cards){
+  const wrap = document.createElement('div');
+  wrap.className = 'winning-combo-block';
+  const label = document.createElement('div');
+  label.className = 'wc-label';
+  label.textContent = `${name}'s winning hand — ${handLabel}`;
+  wrap.appendChild(label);
+
+  const row = document.createElement('div');
+  row.className = 'combo-cards-row';
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS,'svg');
+  svg.setAttribute('class','combo-lines-svg');
+  row.appendChild(svg);
+
+  const cardEls = [];
+  cards.forEach(c=>{
+    const el = cardEl(c);
+    el.classList.add('combo-card');
+    row.appendChild(el);
+    cardEls.push(el);
+  });
+  wrap.appendChild(row);
+
+  requestAnimationFrame(()=>{
+    const rect = row.getBoundingClientRect();
+    if(!rect.width) return;
+    svg.setAttribute('width', rect.width);
+    svg.setAttribute('height', rect.height);
+    svg.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`);
+    const pts = cardEls.map(el=>{
+      const r = el.getBoundingClientRect();
+      return { x: r.left - rect.left + r.width/2, y: r.top - rect.top + r.height/2 };
+    });
+    let d = `M ${pts[0].x} ${pts[0].y}`;
+    for(let i=1;i<pts.length;i++) d += ` L ${pts[i].x} ${pts[i].y}`;
+    const path = document.createElementNS(svgNS,'path');
+    path.setAttribute('d', d);
+    path.setAttribute('class','combo-line-path');
+    svg.appendChild(path);
+  });
+
+  return wrap;
+}
+
 function closeShowdown(){
   if(myView) dismissedShowdownForHand = myView.handNum;
   document.getElementById('showdown-overlay').classList.remove('open');
