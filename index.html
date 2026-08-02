@@ -294,7 +294,7 @@
   <div class="brandmark">♠</div>
   <h1>Heads-Up</h1>
   <div class="sub">Classic Texas Hold'em for two. No servers, no accounts — one phone starts the table, the other connects directly.</div>
-  <button class="stack-btn primary" onclick="goTo('host-connect');resetHostFlow();"><span>Start a table</span><span class="arrow">→</span></button>
+  <button class="stack-btn primary" onclick="goTo('host-connect');hostStartHosting();"><span>Start a table</span><span class="arrow">→</span></button>
   <button class="stack-btn" onclick="goTo('join-connect');resetJoinFlow();"><span>Join a table</span><span class="arrow">→</span></button>
   <div class="footnote">Connection happens phone-to-phone over the internet or same WiFi — copy one short code across (Messages, AirDrop, whatever's handy) and you're at the table.</div>
 </div>
@@ -311,26 +311,17 @@
     <input class="text-field" id="host-name" placeholder="e.g. Sasha" maxlength="16">
   </div>
 
-  <div class="step">
-    <div class="step-label">Step 1 · Your code</div>
-    <p>Tap generate, then send this code to the other player any way you like.</p>
-    <div class="code-chip empty" id="host-offer-code">Not generated yet</div>
+  <div class="step" style="text-align:center;">
+    <div class="step-label">Your table code</div>
+    <p>Share this with the other player. They'll enter it on their phone to join.</p>
+    <div class="code-chip mono" id="host-code-display" style="font-size:32px;letter-spacing:.14em;text-align:center;padding:22px 10px;">------</div>
     <div class="row-btns">
-      <button class="btn gold" id="host-gen-btn" onclick="hostGenerateOffer()">Generate code</button>
-      <button class="btn" id="host-copy-btn" onclick="copyText('host-offer-code')" disabled>Copy</button>
+      <button class="btn" id="host-copy-btn" onclick="copyText('host-code-display')" disabled>Copy code</button>
+      <button class="btn gold" id="host-regen-btn" onclick="hostStartHosting()">New code</button>
     </div>
   </div>
 
-  <div class="step">
-    <div class="step-label">Step 2 · Their reply code</div>
-    <p>Paste the code they send back here.</p>
-    <textarea class="code-input" id="host-answer-input" placeholder="Paste their reply code here"></textarea>
-    <div class="row-btns">
-      <button class="btn gold" onclick="hostAcceptAnswer()">Connect</button>
-    </div>
-  </div>
-
-  <div class="status-line"><span class="dot" id="host-status-dot"></span><span id="host-status-text">Waiting to generate a code</span></div>
+  <div class="status-line"><span class="dot" id="host-status-dot"></span><span id="host-status-text">Getting a code…</span></div>
 </div>
 
 <!-- ============ JOIN CONNECT ============ -->
@@ -346,24 +337,15 @@
   </div>
 
   <div class="step">
-    <div class="step-label">Step 1 · Paste their code</div>
-    <p>Get the code from the host and paste it here.</p>
-    <textarea class="code-input" id="join-offer-input" placeholder="Paste host's code here"></textarea>
+    <div class="step-label">Table code</div>
+    <p>Enter the 6-digit code from the host's screen.</p>
+    <input class="text-field mono" id="join-code-input" placeholder="123456" maxlength="6" inputmode="numeric" pattern="[0-9]*" style="font-size:22px;letter-spacing:.18em;text-align:center;">
     <div class="row-btns">
-      <button class="btn gold" onclick="joinAcceptOffer()">Generate reply code</button>
+      <button class="btn gold" onclick="joinConnect()">Connect</button>
     </div>
   </div>
 
-  <div class="step">
-    <div class="step-label">Step 2 · Send this back</div>
-    <p>Send this reply code back to the host to finish connecting.</p>
-    <div class="code-chip empty" id="join-answer-code">Not generated yet</div>
-    <div class="row-btns">
-      <button class="btn" onclick="copyText('join-answer-code')" id="join-copy-btn" disabled>Copy</button>
-    </div>
-  </div>
-
-  <div class="status-line"><span class="dot" id="join-status-dot"></span><span id="join-status-text">Waiting for host's code</span></div>
+  <div class="status-line"><span class="dot" id="join-status-dot"></span><span id="join-status-text">Enter the code to connect</span></div>
 </div>
 
 <!-- ============ TABLE ============ -->
@@ -527,147 +509,141 @@ function best5of7(cards7){
 function handName(score){ return HAND_NAMES[score[0]]; }
 
 /* ============================================================
-   WEBRTC SIGNALING (manual code exchange, no server)
+   PEER-TO-PEER CONNECTING (short 6-digit codes)
+   PeerJS's free public broker is used only to help the two phones
+   find each other (like a phone book). Once connected, all game
+   data flows directly device-to-device over a WebRTC data channel —
+   nothing about the actual gameplay passes through a server.
    ============================================================ */
-let pc = null, dc = null;
+const PEER_NS = 'huhold5-'; // namespace prefix so our 6-digit codes don't collide with unrelated PeerJS users
+let peer = null, conn = null;
 let isHost = false;
 let myName = 'You', oppName = 'Opponent';
+let hostCurrentCode = null;
 
-function b64encode(obj){
-  return btoa(unescape(encodeURIComponent(JSON.stringify(obj))));
-}
-function b64decode(str){
-  return JSON.parse(decodeURIComponent(escape(atob(str.trim()))));
+function loadPeerJs(){
+  if(window.Peer) return Promise.resolve();
+  if(window.__peerjsLoading) return window.__peerjsLoading;
+  window.__peerjsLoading = new Promise((resolve,reject)=>{
+    const s = document.createElement('script');
+    s.src = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';
+    s.onload = resolve;
+    s.onerror = ()=> reject(new Error('Could not load the connection library. Check your internet connection.'));
+    document.head.appendChild(s);
+  });
+  return window.__peerjsLoading;
 }
 
-function waitIceComplete(peer){
-  return new Promise(resolve=>{
-    if(peer.iceGatheringState === 'complete') return resolve();
-    let done = false;
-    function finish(){
-      if(done) return;
-      done = true;
-      peer.removeEventListener('icegatheringstatechange', check);
-      resolve();
+function randomCode(){
+  return String(Math.floor(100000 + Math.random()*900000));
+}
+
+async function hostStartHosting(attempt){
+  attempt = attempt || 1;
+  myName = (document.getElementById('host-name').value || 'Host').trim();
+  isHost = true;
+  setHostStatus('pending','Getting a code…');
+  document.getElementById('host-code-display').textContent = '------';
+  document.getElementById('host-copy-btn').disabled = true;
+
+  try{
+    await loadPeerJs();
+  }catch(err){
+    toast(err.message);
+    setHostStatus('','Could not load connection library');
+    return;
+  }
+
+  if(peer){ try{ peer.destroy(); }catch(e){} }
+  const code = randomCode();
+  peer = new Peer(PEER_NS + code, { debug: 0 });
+
+  peer.on('open', ()=>{
+    hostCurrentCode = code;
+    document.getElementById('host-code-display').textContent = code;
+    document.getElementById('host-copy-btn').disabled = false;
+    setHostStatus('pending','Waiting for the other player to connect…');
+  });
+
+  peer.on('connection', (c)=>{
+    conn = c;
+    wireConnection(conn);
+  });
+
+  peer.on('error', (err)=>{
+    console.error(err);
+    if(err.type === 'unavailable-id' && attempt < 5){
+      hostStartHosting(attempt+1); // collision — try another code
+    } else {
+      toast('Connection error: ' + err.type);
+      setHostStatus('','Something went wrong — tap "New code" to retry');
     }
-    function check(){
-      if(peer.iceGatheringState === 'complete') finish();
-    }
-    peer.addEventListener('icegatheringstatechange', check);
-    // Safety net: some networks never fully report 'complete'. Don't hang forever —
-    // whatever candidates gathered in 4s is enough to attempt a connection.
-    setTimeout(finish, 4000);
+  });
+
+  peer.on('disconnected', ()=>{
+    setHostStatus('','Lost connection to the network — tap "New code" to retry');
   });
 }
 
-function newPeerConnection(){
-  const p = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
-  return p;
-}
+async function joinConnect(){
+  const codeRaw = document.getElementById('join-code-input').value.trim();
+  if(!/^\d{6}$/.test(codeRaw)){ toast('Enter the 6-digit code from the host\'s screen'); return; }
+  myName = (document.getElementById('join-name').value || 'Guest').trim();
+  isHost = false;
+  setJoinStatus('pending','Connecting…');
 
-async function hostGenerateOffer(){
-  if(typeof RTCPeerConnection === 'undefined'){
-    toast('This browser/page context does not support WebRTC (RTCPeerConnection missing). Try serving over https or localhost instead of opening the file directly.');
-    setHostStatus('','WebRTC unavailable in this context');
+  try{
+    await loadPeerJs();
+  }catch(err){
+    toast(err.message);
+    setJoinStatus('','Could not load connection library');
     return;
   }
-  const btn = document.getElementById('host-gen-btn');
-  btn.disabled = true; btn.textContent = 'Generating…';
-  try{
-    myName = (document.getElementById('host-name').value || 'Host').trim();
-    isHost = true;
-    pc = newPeerConnection();
-    dc = pc.createDataChannel('poker');
-    wireDataChannel(dc);
-    pc.onconnectionstatechange = ()=> updateHostStatus();
-    pc.onicecandidateerror = (e)=> console.warn('ICE candidate error', e);
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await waitIceComplete(pc);
+  if(peer){ try{ peer.destroy(); }catch(e){} }
+  peer = new Peer({ debug: 0 });
 
-    const code = b64encode({sdp: pc.localDescription});
-    const box = document.getElementById('host-offer-code');
-    box.textContent = code;
-    box.classList.remove('empty');
-    document.getElementById('host-copy-btn').disabled = false;
-    setHostStatus('pending','Code ready — send it over, then wait for their reply code');
-  }catch(err){
+  peer.on('open', ()=>{
+    conn = peer.connect(PEER_NS + codeRaw, { reliable: true });
+    wireConnection(conn);
+  });
+
+  peer.on('error', (err)=>{
     console.error(err);
-    toast('Could not generate code: ' + (err && err.message ? err.message : err));
-    setHostStatus('','Failed to generate code — see console for details');
-  }finally{
-    btn.disabled = false; btn.textContent = 'Generate code';
-  }
+    if(err.type === 'peer-unavailable'){
+      toast('No table found with that code — double check it with the host');
+      setJoinStatus('','No table found with that code');
+    } else {
+      toast('Connection error: ' + err.type);
+      setJoinStatus('','Something went wrong — try again');
+    }
+  });
 }
 
-async function hostAcceptAnswer(){
-  const raw = document.getElementById('host-answer-input').value;
-  if(!raw.trim()){ toast('Paste their reply code first'); return; }
-  try{
-    const data = b64decode(raw);
-    await pc.setRemoteDescription(data.sdp);
-    setHostStatus('pending','Connecting…');
-  }catch(e){
-    toast('That code didn\'t look right — check it and try again');
-  }
+function wireConnection(c){
+  c.on('open', ()=>{
+    toast('Connected to opponent');
+    if(isHost) setHostStatus('live','Connected!');
+    else setJoinStatus('live','Connected!');
+    send({type:'hello', name: myName});
+  });
+  c.on('data', (msg)=>{
+    handleMessage(msg);
+  });
+  c.on('close', ()=>{
+    toast('Opponent disconnected');
+    if(isHost) setHostStatus('','Opponent disconnected');
+    else setJoinStatus('','Opponent disconnected');
+  });
+  c.on('error', (err)=>{
+    console.error(err);
+  });
 }
 
-function updateHostStatus(){
-  if(!pc) return;
-  if(pc.connectionState === 'connected'){
-    setHostStatus('live','Connected!');
-  }else if(pc.connectionState === 'failed' || pc.connectionState==='disconnected'){
-    setHostStatus('','Connection lost');
-  }
-}
 function setHostStatus(cls,text){
   const dot = document.getElementById('host-status-dot');
   dot.className = 'dot' + (cls?(' '+cls):'');
   document.getElementById('host-status-text').textContent = text;
-}
-
-async function joinAcceptOffer(){
-  if(typeof RTCPeerConnection === 'undefined'){
-    toast('This browser/page context does not support WebRTC (RTCPeerConnection missing). Try serving over https or localhost instead of opening the file directly.');
-    setJoinStatus('','WebRTC unavailable in this context');
-    return;
-  }
-  const raw = document.getElementById('join-offer-input').value;
-  if(!raw.trim()){ toast('Paste the host\'s code first'); return; }
-  myName = (document.getElementById('join-name').value || 'Guest').trim();
-  isHost = false;
-  try{
-    const data = b64decode(raw);
-    pc = newPeerConnection();
-    pc.ondatachannel = (ev)=>{ dc = ev.channel; wireDataChannel(dc); };
-    pc.onconnectionstatechange = ()=> updateJoinStatus();
-    pc.onicecandidateerror = (e)=> console.warn('ICE candidate error', e);
-
-    await pc.setRemoteDescription(data.sdp);
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    await waitIceComplete(pc);
-
-    const code = b64encode({sdp: pc.localDescription});
-    const box = document.getElementById('join-answer-code');
-    box.textContent = code;
-    box.classList.remove('empty');
-    document.getElementById('join-copy-btn').disabled = false;
-    setJoinStatus('pending','Send this back to the host, then hang tight');
-  }catch(e){
-    console.error(e);
-    toast('Could not read that code: ' + (e && e.message ? e.message : e));
-    setJoinStatus('','Failed — check the code and try again');
-  }
-}
-function updateJoinStatus(){
-  if(!pc) return;
-  if(pc.connectionState === 'connected'){
-    setJoinStatus('live','Connected!');
-  }else if(pc.connectionState === 'failed' || pc.connectionState==='disconnected'){
-    setJoinStatus('','Connection lost');
-  }
 }
 function setJoinStatus(cls,text){
   const dot = document.getElementById('join-status-dot');
@@ -677,7 +653,7 @@ function setJoinStatus(cls,text){
 
 function copyText(id){
   const text = document.getElementById(id).textContent;
-  if(!text || text.startsWith('Not generated')) return;
+  if(!text || text.includes('------')) return;
   navigator.clipboard?.writeText(text).then(()=>toast('Copied')).catch(()=>{
     const ta = document.createElement('textarea');
     ta.value = text; document.body.appendChild(ta); ta.select();
@@ -686,40 +662,13 @@ function copyText(id){
   });
 }
 
-function wireDataChannel(channel){
-  channel.onopen = ()=>{
-    toast('Connected to opponent');
-    if(isHost){
-      // host exchanges names then starts the game
-      send({type:'hello', name: myName});
-    } else {
-      send({type:'hello', name: myName});
-    }
-  };
-  channel.onmessage = (ev)=>{
-    const msg = JSON.parse(ev.data);
-    handleMessage(msg);
-  };
-  channel.onclose = ()=> toast('Opponent disconnected');
-}
-
 function send(msg){
-  if(dc && dc.readyState === 'open') dc.send(JSON.stringify(msg));
+  if(conn && conn.open) conn.send(msg);
 }
 
-function resetHostFlow(){
-  document.getElementById('host-offer-code').textContent = 'Not generated yet';
-  document.getElementById('host-offer-code').classList.add('empty');
-  document.getElementById('host-answer-input').value='';
-  document.getElementById('host-copy-btn').disabled = true;
-  setHostStatus('','Waiting to generate a code');
-}
 function resetJoinFlow(){
-  document.getElementById('join-offer-input').value='';
-  document.getElementById('join-answer-code').textContent = 'Not generated yet';
-  document.getElementById('join-answer-code').classList.add('empty');
-  document.getElementById('join-copy-btn').disabled = true;
-  setJoinStatus('','Waiting for host\'s code');
+  document.getElementById('join-code-input').value='';
+  setJoinStatus('','Enter the code to connect');
 }
 
 /* ============================================================
@@ -963,6 +912,13 @@ function applyAction(idx, action, amount){
 
 function maybeStartNextHand(){
   if(hostWantsNext && guestWantsNext){
+    const matchOver = game.stacks[0] <= 0 || game.stacks[1] <= 0;
+    if(matchOver){
+      // A player is out of chips — start a brand new match rather than dealing
+      // a broken hand with a zero stack (this was causing the same result to
+      // repeat every hand).
+      game.stacks = [STARTING_STACK, STARTING_STACK];
+    }
     game.dealer = 1 - game.dealer;
     startHand();
   } else {
@@ -1167,8 +1123,9 @@ function renderTable(){
   }
 
   if(isShowdown){
+    const matchOver = v.myStack<=0 || v.oppStack<=0;
     document.getElementById('btn-next-hand').disabled = false;
-    document.getElementById('btn-next-hand').textContent = 'Deal next hand';
+    document.getElementById('btn-next-hand').textContent = matchOver ? 'Start new match' : 'Deal next hand';
     showShowdownOverlay(v);
   }
 
