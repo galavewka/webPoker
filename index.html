@@ -78,6 +78,7 @@
   .lobby-empty-slot{opacity:.35;font-style:italic;}
 
   #table{padding:0;position:relative;}
+  .table-scale-wrapper{flex:1;width:100%;display:flex;flex-direction:column;}
   .felt-wrap{flex:1;position:relative;display:flex;flex-direction:column;
     background:radial-gradient(120% 70% at 50% 38%, var(--felt-1) 0%, var(--felt-2) 70%),
       repeating-linear-gradient(45deg, rgba(0,0,0,0.03) 0 2px, transparent 2px 6px);
@@ -190,19 +191,64 @@
   }
   .pot-badge.pot-bump{ animation: potBump .35s ease; }
 
-  .action-bubble{
-    position:absolute; top:-28px; left:50%; transform:translateX(-50%);
+  /* ---------- Chat & voice ---------- */
+  #chat-toggle-btn, #voice-toggle-btn{
+    position:fixed; top:calc(env(safe-area-inset-top) + 8px); z-index:40;
+    width:40px;height:40px;border-radius:50%;
+    background:rgba(0,0,0,.4); border:1px solid var(--panel-line); color:var(--cream);
+    font-size:17px; display:flex; align-items:center; justify-content:center;
+    cursor:pointer;
+  }
+  #chat-toggle-btn{ right:12px; }
+  #voice-toggle-btn{ right:60px; }
+  #voice-toggle-btn.on{ background:linear-gradient(180deg,#d9b862,var(--gold)); color:#20160a; border-color:var(--gold); }
+  #voice-toggle-btn.muted-indicator{ background:rgba(179,64,44,.5); border-color:var(--red); }
+  .chat-badge{ position:absolute; top:-3px; right:-3px; min-width:16px; height:16px; border-radius:8px;
+    background:var(--red); color:#fff; font-size:9px; font-family:'IBM Plex Mono',monospace;
+    display:flex; align-items:center; justify-content:center; padding:0 3px; }
+
+  .chat-panel{
+    position:fixed; left:0; right:0; bottom:0; background:var(--panel);
+    border-top:1px solid var(--gold); border-radius:18px 18px 0 0;
+    max-height:60vh; display:flex; flex-direction:column;
+    transform:translateY(105%); transition:transform .28s ease; z-index:60;
+    box-shadow:0 -8px 30px rgba(0,0,0,.4);
+  }
+  .chat-panel.open{ transform:translateY(0); }
+  .chat-header{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px;
+    border-bottom:1px solid var(--panel-line); font-weight:600; font-family:'Fraunces',serif; color:var(--gold-bright); }
+  .chat-header button{ background:none; border:none; color:var(--cream); font-size:18px; cursor:pointer; }
+  .chat-messages{ flex:1; overflow-y:auto; padding:12px 16px; display:flex; flex-direction:column; gap:8px; min-height:120px; }
+  .chat-bubble{ max-width:80%; background:rgba(0,0,0,.25); border:1px solid var(--panel-line); border-radius:12px;
+    padding:6px 10px; align-self:flex-start; }
+  .chat-bubble.mine{ align-self:flex-end; background:linear-gradient(180deg,#d9b862,var(--gold)); border:none; color:#20160a; }
+  .chat-bubble .chat-meta{ font-size:10px; color:#9db8ab; font-family:'IBM Plex Mono',monospace; margin-bottom:2px; }
+  .chat-bubble.mine .chat-meta{ color:#4a3a14; }
+  .chat-bubble .chat-text{ font-size:14px; line-height:1.4; word-break:break-word; }
+  .chat-input-row{ display:flex; gap:8px; padding:10px 14px calc(env(safe-area-inset-bottom) + 10px); border-top:1px solid var(--panel-line); }
+  .chat-input-row input{ flex:1; padding:10px 12px; border-radius:20px; border:1px solid var(--panel-line);
+    background:var(--ink); color:var(--cream); font-size:14px; }
+  .chat-input-row button{ padding:10px 16px; border-radius:20px; border:none;
+    background:linear-gradient(180deg,#d9b862,var(--gold)); color:#20160a; font-weight:700; cursor:pointer; }
+
+  /* Fixed overlay layer for action bubbles + chat preview toasts — sits above everything,
+     positioned via getBoundingClientRect so it's never clipped by scroll containers. */
+  #fx-layer{ position:fixed; inset:0; pointer-events:none; z-index:55; overflow:visible; }
+  .fx-bubble{
+    position:fixed; transform:translate(-50%,0);
     background:var(--ink); border:1px solid var(--gold); color:var(--gold-bright);
     font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:600;
-    padding:4px 10px; border-radius:12px; white-space:nowrap; pointer-events:none; z-index:6;
-    animation: bubbleFloat 1.5s ease forwards;
+    padding:4px 10px; border-radius:12px; white-space:nowrap; max-width:70vw;
+    text-overflow:ellipsis; overflow:hidden;
+    animation: bubbleDown 1.6s ease forwards;
   }
-  @keyframes bubbleFloat{
-    0%{ opacity:0; transform: translate(-50%,6px) scale(.9); }
-    15%{ opacity:1; transform: translate(-50%,-4px) scale(1); }
-    75%{ opacity:1; transform: translate(-50%,-16px) scale(1); }
-    100%{ opacity:0; transform: translate(-50%,-28px) scale(.95); }
+  @keyframes bubbleDown{
+    0%{ opacity:0; transform:translate(-50%,-8px) scale(.9); }
+    15%{ opacity:1; transform:translate(-50%,4px) scale(1); }
+    75%{ opacity:1; transform:translate(-50%,16px) scale(1); }
+    100%{ opacity:0; transform:translate(-50%,28px) scale(.95); }
   }
+  .fx-bubble.chat-preview{ border-color:var(--gold-bright); }
 
   /* Winning-hand combo visualization */
   .winning-combo-block{ margin-bottom:18px; }
@@ -240,7 +286,7 @@
 
   <div class="step">
     <div class="step-label">Your name</div>
-    <input class="text-field" id="host-name" placeholder="e.g. Sasha" maxlength="16">
+    <input class="text-field" id="host-name" placeholder="e.g. Sasha" maxlength="16" oninput="onHostNameChange()">
   </div>
 
   <div class="step">
@@ -303,6 +349,7 @@
 
 <!-- ============ TABLE ============ -->
 <div class="screen" id="table">
+  <div class="table-scale-wrapper" id="table-scale-wrapper">
   <div class="felt-wrap">
     <div class="hud">
       <div class="stage-pill" id="stage-pill">Preflop</div>
@@ -364,7 +411,28 @@
       </div>
     </div>
   </div>
+  </div>
 </div>
+
+<button id="chat-toggle-btn" onclick="toggleChat()" style="display:none;">
+  💬<span class="chat-badge" id="chat-badge" style="display:none;">0</span>
+</button>
+
+<button id="voice-toggle-btn" onclick="toggleVoice()" style="display:none;">🎤</button>
+
+<div class="chat-panel" id="chat-panel">
+  <div class="chat-header">
+    <span>Table chat</span>
+    <button onclick="toggleChat()">✕</button>
+  </div>
+  <div class="chat-messages" id="chat-messages"></div>
+  <div class="chat-input-row">
+    <input id="chat-input" placeholder="Message…" maxlength="200" onkeydown="if(event.key==='Enter'){sendChatMessage();}">
+    <button onclick="sendChatMessage()">Send</button>
+  </div>
+</div>
+
+<div id="fx-layer"></div>
 
 <div id="showdown-overlay">
   <div class="sd-card">
@@ -377,6 +445,7 @@
 </div>
 
 <div id="toast"></div>
+
 
 <script>
 /* ============================================================
@@ -453,6 +522,20 @@ let gameStarted = false;
 let hostConn = null;
 let mySeatAsGuest = null;
 
+// Chat
+let chatLog = [];
+let chatOpen = false;
+let chatUnread = 0;
+
+// Voice (full mesh: everyone calls everyone directly once they enable their mic)
+let seatPeerIds = [];         // host-only: seat -> peerId roster
+let voiceRosterFromHost = []; // guest-only: last roster received from host
+let localStream = null;
+let voiceEnabled = false;
+let activeCalls = {};         // peerId -> MediaConnection
+let remoteAudioEls = {};      // peerId -> <audio>
+
+
 function loadPeerJs(){
   if(window.Peer) return Promise.resolve();
   if(window.__peerjsLoading) return window.__peerjsLoading;
@@ -484,6 +567,9 @@ async function hostStartHosting(attempt){
   gameStarted = false;
   conns = [];
   seatNames = [document.getElementById('host-name').value.trim() || 'Host'];
+  seatPeerIds = [null];
+  resetVoiceState();
+  resetChatState();
   renderHostLobby();
   setHostStatus('pending','Getting a code…');
   document.getElementById('host-code-display').textContent = '------';
@@ -500,7 +586,10 @@ async function hostStartHosting(attempt){
     document.getElementById('host-code-display').textContent = code;
     document.getElementById('host-copy-btn').disabled = false;
     setHostStatus('pending','Waiting for players to connect…');
+    seatPeerIds[0] = peer.id;
   });
+
+  peer.on('call', handleIncomingCall);
 
   peer.on('connection', (c)=>{
     if(gameStarted){ c.on('open',()=>{ c.send({type:'rejected', reason:'Game already started'}); c.close(); }); return; }
@@ -516,15 +605,18 @@ async function hostStartHosting(attempt){
       const idx = conns.indexOf(c);
       if(idx>=0){
         toast((seatNames[seat]||'A player') + ' disconnected');
+        closeVoiceCallForPeer(seatPeerIds[seat]);
         // Keep their seat/name in place if a game is underway so indices stay stable;
         // in the lobby, just drop them.
         if(!gameStarted){
           conns.splice(idx,1);
           seatNames.splice(seat,1);
+          seatPeerIds.splice(seat,1);
           renumberConns();
           conns.forEach((rc,ri)=>{ if(rc.open) rc.send({type:'welcome', seat: ri+1}); });
         }
         renderHostLobby();
+        broadcastVoiceRoster();
       }
     });
   });
@@ -565,9 +657,16 @@ function renderHostLobby(){
 
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+function onHostNameChange(){
+  seatNames[0] = document.getElementById('host-name').value.trim() || 'Host';
+  renderHostLobby();
+}
+
 function hostBeginGame(){
   const total = seatNames.length;
   if(total < 2) return;
+  const typed = document.getElementById('host-name').value.trim();
+  if(typed){ seatNames[0] = typed; myName = typed; }
   gameStarted = true;
   goTo('table');
   startNewMatch(total);
@@ -576,12 +675,26 @@ function hostBeginGame(){
 function handleHostMessage(seat, msg){
   if(msg.type === 'hello'){
     seatNames[seat] = msg.name || ('Player ' + (seat+1));
+    seatPeerIds[seat] = msg.peerId || null;
     renderHostLobby();
     broadcastLobby();
+    broadcastVoiceRoster();
     return;
   }
   if(msg.type === 'action'){ applyAction(seat, msg.action, msg.amount); return; }
   if(msg.type === 'requestNextHand'){ readyForNext.add(seat); maybeStartNextHand(); return; }
+  if(msg.type === 'chat'){
+    const full = { type:'chat', seat, name: seatNames[seat] || ('Player '+(seat+1)), text: String(msg.text||'').slice(0,200), ts: Date.now() };
+    addChatMessage(full);
+    conns.forEach((c,i)=>{ if(c.open && (i+1)!==seat) c.send(full); });
+    return;
+  }
+}
+
+function broadcastVoiceRoster(){
+  const payload = {type:'voiceRoster', peerIds: seatPeerIds.slice()};
+  conns.forEach(c=>{ if(c.open) c.send(payload); });
+  if(voiceEnabled) connectVoiceToAll();
 }
 
 function broadcastLobby(){
@@ -595,19 +708,22 @@ async function joinConnect(){
   myName = (document.getElementById('join-name').value || 'Guest').trim();
   isHost = false;
   setJoinStatus('pending','Connecting…');
+  resetVoiceState();
+  resetChatState();
 
   try{ await loadPeerJs(); }
   catch(err){ toast(err.message); setJoinStatus('','Could not load connection library'); return; }
 
   if(peer){ try{ peer.destroy(); }catch(e){} }
   peer = new Peer({ debug: 0 });
+  peer.on('call', handleIncomingCall);
 
   peer.on('open', ()=>{
     hostConn = peer.connect(PEER_NS + codeRaw, { reliable: true });
     hostConn.on('open', ()=>{
       setJoinStatus('live','Connected!');
       toast('Connected to table');
-      hostConn.send({type:'hello', name: myName});
+      hostConn.send({type:'hello', name: myName, peerId: peer.id});
     });
     hostConn.on('data', (msg)=> handleGuestMessage(msg));
     hostConn.on('close', ()=>{
@@ -631,6 +747,15 @@ function handleGuestMessage(msg){
   }
   if(msg.type === 'welcome'){
     mySeatAsGuest = msg.seat;
+    return;
+  }
+  if(msg.type === 'chat'){
+    addChatMessage(msg);
+    return;
+  }
+  if(msg.type === 'voiceRoster'){
+    voiceRosterFromHost = msg.peerIds;
+    if(voiceEnabled) connectVoiceToAll();
     return;
   }
   if(msg.type === 'lobby'){
@@ -1062,6 +1187,177 @@ function requestNextHand(){
 }
 
 /* ============================================================
+   TEXT CHAT
+   Routed through the host (star topology) — same connections
+   used for game data.
+   ============================================================ */
+function resetChatState(){
+  chatLog = [];
+  chatOpen = false;
+  chatUnread = 0;
+  const panel = document.getElementById('chat-panel');
+  if(panel) panel.classList.remove('open');
+  const list = document.getElementById('chat-messages');
+  if(list) list.innerHTML = '';
+  updateChatBadge();
+}
+
+function toggleChat(){
+  chatOpen = !chatOpen;
+  document.getElementById('chat-panel').classList.toggle('open', chatOpen);
+  if(chatOpen){
+    chatUnread = 0;
+    updateChatBadge();
+    setTimeout(()=>document.getElementById('chat-input').focus(), 150);
+  }
+}
+
+function updateChatBadge(){
+  const badge = document.getElementById('chat-badge');
+  if(!badge) return;
+  if(chatUnread > 0){ badge.style.display='flex'; badge.textContent = chatUnread>9?'9+':chatUnread; }
+  else badge.style.display='none';
+}
+
+function sendChatMessage(){
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if(!text) return;
+  input.value = '';
+  const seat = mySeatNum();
+  const localMsg = { type:'chat', seat, name: myName, text: text.slice(0,200), ts: Date.now() };
+  addChatMessage(localMsg);
+  if(isHost){
+    conns.forEach(c=>{ if(c.open) c.send(localMsg); });
+  } else {
+    sendToHost({type:'chat', text});
+  }
+}
+
+function addChatMessage(msg){
+  chatLog.push(msg);
+  renderChatMessage(msg);
+  const messagesEl = document.getElementById('chat-messages');
+  if(messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+  const isMine = msg.seat === mySeatNum();
+  if(!isMine){
+    if(!chatOpen){ chatUnread++; updateChatBadge(); }
+    spawnChatPreviewBubble(`${msg.name}: ${msg.text}`);
+  }
+}
+
+function renderChatMessage(msg){
+  const messagesEl = document.getElementById('chat-messages');
+  if(!messagesEl) return;
+  const mine = msg.seat === mySeatNum();
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-bubble' + (mine ? ' mine':'');
+  const time = new Date(msg.ts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  bubble.innerHTML = `<div class="chat-meta">${mine?'You':escapeHtml(msg.name)} · ${time}</div><div class="chat-text">${escapeHtml(msg.text)}</div>`;
+  messagesEl.appendChild(bubble);
+}
+
+/* ============================================================
+   VOICE CHAT
+   Full mesh: once someone taps the mic, they place a direct
+   WebRTC audio call to every other connected peer (using the
+   same PeerJS peer object used for game data). The host relays
+   everyone's peer IDs so each client can find the others —
+   the audio itself never passes through the host.
+   ============================================================ */
+function resetVoiceState(){
+  voiceEnabled = false;
+  if(localStream){ try{ localStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
+  localStream = null;
+  Object.values(activeCalls).forEach(c=>{ try{ c.close(); }catch(e){} });
+  activeCalls = {};
+  Object.values(remoteAudioEls).forEach(el=>el.remove());
+  remoteAudioEls = {};
+  voiceRosterFromHost = [];
+  updateVoiceButton();
+}
+
+function currentVoiceRoster(){
+  return (isHost ? seatPeerIds : voiceRosterFromHost) || [];
+}
+
+async function toggleVoice(){
+  if(!voiceEnabled){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      toast('This browser does not support microphone access');
+      return;
+    }
+    try{
+      localStream = await navigator.mediaDevices.getUserMedia({audio:true, video:false});
+    }catch(err){
+      toast('Microphone permission denied or unavailable');
+      return;
+    }
+    voiceEnabled = true;
+    updateVoiceButton();
+    connectVoiceToAll();
+    toast('Voice chat on');
+  } else {
+    resetVoiceState();
+    toast('Voice chat off');
+  }
+}
+
+function connectVoiceToAll(){
+  if(!voiceEnabled || !localStream || !peer) return;
+  const myId = peer.id;
+  currentVoiceRoster().forEach(pid=>{
+    if(!pid || pid===myId) return;
+    if(activeCalls[pid]) return;
+    try{
+      const call = peer.call(pid, localStream);
+      if(call) wireMediaCall(call, pid);
+    }catch(e){ console.warn('voice call failed', e); }
+  });
+}
+
+function handleIncomingCall(call){
+  if(voiceEnabled && localStream){
+    call.answer(localStream);
+    wireMediaCall(call, call.peer);
+  }
+  // If we're not in voice right now, we simply don't answer — the caller's
+  // call attempt will just go unanswered rather than erroring out.
+}
+
+function wireMediaCall(call, pid){
+  activeCalls[pid] = call;
+  call.on('stream', (remoteStream)=>{
+    let audioEl = remoteAudioEls[pid];
+    if(!audioEl){
+      audioEl = document.createElement('audio');
+      audioEl.autoplay = true;
+      audioEl.playsInline = true;
+      audioEl.style.display = 'none';
+      document.body.appendChild(audioEl);
+      remoteAudioEls[pid] = audioEl;
+    }
+    audioEl.srcObject = remoteStream;
+  });
+  call.on('close', ()=>{ delete activeCalls[pid]; if(remoteAudioEls[pid]){ remoteAudioEls[pid].remove(); delete remoteAudioEls[pid]; } });
+  call.on('error', (e)=> console.warn('voice call error', e));
+}
+
+function closeVoiceCallForPeer(pid){
+  if(!pid) return;
+  const call = activeCalls[pid];
+  if(call){ try{ call.close(); }catch(e){} delete activeCalls[pid]; }
+  if(remoteAudioEls[pid]){ remoteAudioEls[pid].remove(); delete remoteAudioEls[pid]; }
+}
+
+function updateVoiceButton(){
+  const btn = document.getElementById('voice-toggle-btn');
+  if(!btn) return;
+  btn.classList.toggle('on', voiceEnabled);
+  btn.textContent = voiceEnabled ? '🎤' : '🔇';
+}
+
+/* ============================================================
    RENDERING
    ============================================================ */
 function cardEl(card, {back=false, placeholder=false, mini=false}={}){
@@ -1196,11 +1492,27 @@ let lastCommunityCountForDeal = 0;
 let lastRenderedActionSeq = null;
 
 function spawnActionBubble(anchorEl, text){
+  const rect = anchorEl.getBoundingClientRect();
   const bubble = document.createElement('div');
-  bubble.className = 'action-bubble';
+  bubble.className = 'fx-bubble';
   bubble.textContent = text;
-  anchorEl.appendChild(bubble);
+  bubble.style.left = (rect.left + rect.width/2) + 'px';
+  bubble.style.top = (rect.bottom + 4) + 'px';
+  document.getElementById('fx-layer').appendChild(bubble);
   setTimeout(()=>{ bubble.remove(); }, 1600);
+}
+
+function spawnChatPreviewBubble(text){
+  const anchor = document.getElementById('chat-toggle-btn');
+  if(!anchor || anchor.style.display === 'none') return;
+  const rect = anchor.getBoundingClientRect();
+  const bubble = document.createElement('div');
+  bubble.className = 'fx-bubble chat-preview';
+  bubble.textContent = text;
+  bubble.style.left = Math.min(rect.left + rect.width/2, window.innerWidth - 20) + 'px';
+  bubble.style.top = (rect.bottom + 6) + 'px';
+  document.getElementById('fx-layer').appendChild(bubble);
+  setTimeout(()=>{ bubble.remove(); }, 2400);
 }
 
 function allEliminatedExceptOne(v){
@@ -1316,7 +1628,25 @@ function closeShowdown(){
 function goTo(id){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
+  const onTable = id === 'table';
+  document.getElementById('chat-toggle-btn').style.display = onTable ? 'flex' : 'none';
+  document.getElementById('voice-toggle-btn').style.display = onTable ? 'flex' : 'none';
+  if(!onTable){
+    document.getElementById('chat-panel').classList.remove('open');
+    chatOpen = false;
+  }
+  if(onTable){ requestAnimationFrame(applyTableScale); }
 }
+
+function applyTableScale(){
+  // Full-screen layout restored — the table now fills the viewport naturally
+  // via flex/dvh instead of being scaled down inside a fixed-size box.
+  const wrapper = document.getElementById('table-scale-wrapper');
+  if(wrapper) wrapper.style.transform = 'none';
+}
+window.addEventListener('resize', ()=>{ if(document.getElementById('table').classList.contains('active')) applyTableScale(); });
+window.addEventListener('orientationchange', ()=>{ setTimeout(applyTableScale, 250); });
+
 let toastTimer;
 function toast(msg){
   const el = document.getElementById('toast');
