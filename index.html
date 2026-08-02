@@ -622,6 +622,13 @@ async function joinConnect(){
 
 function wireConnection(c){
   c.on('open', ()=>{
+    // Re-read the name field now (not when hosting/joining started) so a name
+    // typed in after the code was generated still gets picked up.
+    const field = document.getElementById(isHost ? 'host-name' : 'join-name');
+    const typed = field ? field.value.trim() : '';
+    if(typed) myName = typed;
+    else if(!myName || myName === 'Host' || myName === 'Guest') myName = isHost ? 'Host' : 'Guest';
+
     toast('Connected to opponent');
     if(isHost) setHostStatus('live','Connected!');
     else setJoinStatus('live','Connected!');
