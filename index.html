@@ -949,13 +949,13 @@ function buildView(forGuest){
     toCall: Math.max(0, game.currentBet - game.bets[meIdx]),
     dealerIsMe: game.dealer === meIdx,
     log: game.log,
-    myName: forGuest ? oppNameOfHost() : myName,
+    myName: forGuest ? oppName : myName,
     oppName: forGuest ? myName : oppName,
     showdown: game.showdown,
+    handNum: game.handNum,
     meIdxGlobal: meIdx
   };
 }
-function oppNameOfHost(){ return myName; } // from guest's perspective, host's myName is opponent
 
 function broadcastState(){
   if(!isHost) return;
@@ -1126,15 +1126,13 @@ function renderTable(){
     const matchOver = v.myStack<=0 || v.oppStack<=0;
     document.getElementById('btn-next-hand').disabled = false;
     document.getElementById('btn-next-hand').textContent = matchOver ? 'Start new match' : 'Deal next hand';
-    showShowdownOverlay(v);
-  }
-
-  if(v.myStack<=0 || v.oppStack<=0){
-    // match over — still show showdown overlay content but block further hands text
+    if(v.handNum !== dismissedShowdownForHand){
+      showShowdownOverlay(v);
+    }
   }
 }
 
-let lastShowdownHandNum = null;
+let dismissedShowdownForHand = null;
 function showShowdownOverlay(v){
   if(!v.showdown) return;
   const key = v.log;
@@ -1173,6 +1171,7 @@ function showShowdownOverlay(v){
   document.getElementById('showdown-overlay').classList.add('open');
 }
 function closeShowdown(){
+  if(myView) dismissedShowdownForHand = myView.handNum;
   document.getElementById('showdown-overlay').classList.remove('open');
 }
 
