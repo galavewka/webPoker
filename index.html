@@ -548,8 +548,8 @@ let myName = 'You';
 let hostMaxPlayers = 2;
 
 // HOST-only bookkeeping
-let conns = [];        // conns[i] = DataConnection for seat (i+1)
-let seatNames = [];    // seatNames[0] = host name, seatNames[i] = guest name
+let conns = [];        
+let seatNames = [];    
 let gameStarted = false;
 
 // GUEST-only
@@ -561,22 +561,22 @@ let chatLog = [];
 let chatOpen = false;
 let chatUnread = 0;
 
-// Voice (full mesh: everyone calls everyone directly once they enable their mic)
-let seatPeerIds = [];         // host-only: seat -> peerId roster
-let voiceRosterFromHost = []; // guest-only: last roster received from host
-let rawMicStream = null;      // unprocessed hardware mic capture (needed so we can actually release the mic on mute)
-let localStream = null;       // gain-adjusted mic audio actually sent to peers
+// Voice/Video
+let seatPeerIds = [];         
+let voiceRosterFromHost = []; 
+let rawMicStream = null;      
+let localStream = null;       
 let micGainNode = null;
-let micGainValue = 1;         // 1.0 = 100%
-let camStream = null;         // camera video track source
-let outboundStream = null;    // combined mic+camera tracks actually sent to peers
+let micGainValue = 1;         
+let camStream = null;         
+let outboundStream = null;    
 let voiceEnabled = false;
 let camEnabled = false;
-let activeCalls = {};         // peerId -> MediaConnection
-let remoteAudioEls = {};      // peerId -> <audio>
-let videoEls = {};            // seat -> <video> (persistent, attached to the avatar)
+let activeCalls = {};         
+let remoteAudioEls = {};      
+let videoEls = {};            
 let speakingSeats = new Set();
-let speakingDetectors = {};   // peerId or 'local' -> {timer}
+let speakingDetectors = {};   
 
 
 function loadPeerJs(){
@@ -639,7 +639,7 @@ async function hostStartHosting(attempt){
     const totalNow = 1 + conns.length;
     if(totalNow >= hostMaxPlayers){ c.on('open',()=>{ c.send({type:'rejected', reason:'Table is full'}); c.close(); }); return; }
     conns.push(c);
-    const seat = conns.length; // 1-based seat for this guest
+    const seat = conns.length; 
     c.on('open', ()=>{
       c.send({type:'welcome', seat});
     });
@@ -795,7 +795,7 @@ function handleGuestMessage(msg){
   }
   if(msg.type === 'voiceRoster'){
     voiceRosterFromHost = msg.peerIds;
-    if(voiceEnabled) connectVoiceToAll();
+    if(voiceEnabled || camEnabled) connectVoiceToAll();
     return;
   }
   if(msg.type === 'lobby'){
@@ -849,9 +849,8 @@ function resetJoinFlow(){
   setJoinStatus('','Enter the code to connect');
 }
 
-/* Unified send: host -> a specific seat, or host -> broadcast (during gameplay use per-seat views) */
 function sendToSeat(seat, msg){
-  if(seat===0) return; // host doesn't message itself
+  if(seat===0) return; 
   const c = conns[seat-1];
   if(c && c.open) c.send(msg);
 }
@@ -1032,7 +1031,6 @@ function doShowdown(){
 }
 
 function computeSidePots(){
-  // Standard side-pot algorithm using each seat's total contribution this hand.
   const contribs = game.contributions;
   const levels = [...new Set(contribs.filter(c=>c>0))].sort((a,b)=>a-b);
   let prev = 0;
@@ -1396,8 +1394,7 @@ async function _toggleVoiceImpl(){
     startSpeakingDetector('local', localStream);
     toast('Mic on');
   } else {
-    // Soft mute: stop sending our own audio, but leave existing connections
-    // open so we keep hearing anyone else who's still broadcasting.
+    // Soft mute locally, but completely sync connection state so tracks reflect correctly
     voiceEnabled = false;
     if(rawMicStream){ try{ rawMicStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
     rawMicStream = null;
@@ -1407,6 +1404,8 @@ async function _toggleVoiceImpl(){
     stopSpeakingDetector('local');
     updateVoiceButton();
     updateMicVolumeUI();
+    rebuildOutboundStream();
+    scheduleReconnect();
     toast('Mic off — you can still hear others');
   }
 }
@@ -1446,12 +1445,20 @@ async function _toggleCameraImpl(){
     camStream = null;
     updateCameraButton();
     hideLocalVideoPreview();
+    rebuildOutboundStream();
+    scheduleReconnect();
     toast('Camera off');
   }
 }
 
 function connectVoiceToAll(){
-  if(!outboundStream || !peer) return;
+  if(!peer) return;
+  // If there are no tracks to send, gracefully close active connections
+  if(!outboundStream) {
+    Object.values(activeCalls).forEach(c => { try{ c.close(); }catch(e){} });
+    activeCalls = {};
+    return;
+  }
   const myId = peer.id;
   currentVoiceRoster().forEach(pid=>{
     if(!pid || pid===myId) return;
@@ -1483,6 +1490,7 @@ function wireMediaCall(call, pid){
       remoteAudioEls[pid] = audioEl;
     }
     audioEl.srcObject = remoteStream;
+    audioEl.play().catch(()=>{}); // Explicit play to guarantee audio unlocks on reconnect
     startSpeakingDetector(pid, remoteStream);
 
     const seat = peerIdToSeat(pid);
@@ -1492,6 +1500,7 @@ function wireMediaCall(call, pid){
         const vEl = getOrCreateVideoEl(seat, true);
         vEl.srcObject = remoteStream;
         vEl.dataset.hasVideo = '1';
+        vEl.play().catch(()=>{}); // Explicit play guarantees video unfreezes 
       } else if(videoEls[seat]){
         videoEls[seat].dataset.hasVideo = '0';
       }
@@ -1596,6 +1605,7 @@ function showLocalVideoPreview(){
   vEl.classList.add('local-mirror');
   vEl.srcObject = camStream;
   vEl.dataset.hasVideo = '1';
+  vEl.play().catch(()=>{}); // Explicit play guarantees video unfreezes 
   positionVideoOverlays();
 }
 function hideLocalVideoPreview(){
@@ -1619,6 +1629,8 @@ function positionVideoOverlays(){
     if(show && avatarEl){
       if(vEl.parentNode !== avatarEl){
         avatarEl.appendChild(vEl);
+        // Explicitly start playback any time the video is attached to the DOM
+        vEl.play().catch(e=>console.warn('Playback block', e));
       }
       vEl.style.display = 'block';
     } else {
