@@ -83,7 +83,7 @@
     background:radial-gradient(120% 70% at 50% 38%, var(--felt-1) 0%, var(--felt-2) 70%),
       repeating-linear-gradient(45deg, rgba(0,0,0,0.03) 0 2px, transparent 2px 6px);
     border-bottom:6px solid var(--felt-edge);}
-  .hud{display:flex;justify-content:space-between;align-items:flex-start;padding:calc(env(safe-area-inset-top) + 10px) 116px 4px 14px;
+  .hud{display:flex;justify-content:space-between;align-items:flex-start;padding:calc(env(safe-area-inset-top) + 10px) 156px 4px 14px;
     font-family:'IBM Plex Mono',monospace;font-size:11px;color:#bcd6c9;}
   .hud .stage-pill,.hud .pot-pill{background:rgba(0,0,0,.25);border:1px solid var(--panel-line);padding:5px 12px;border-radius:20px;}
   .hud .stage-pill{letter-spacing:.1em;text-transform:uppercase;color:var(--gold-bright);}
@@ -153,8 +153,10 @@
   .sd-card h2{margin:0 0 10px;font-size:21px;color:var(--gold-bright);}
   .sd-pot-line{font-size:13px;color:#bcd6c9;margin-bottom:4px;}
   .sd-hands{display:flex;flex-wrap:wrap;justify-content:center;gap:14px;margin:16px 0;}
-  .sd-hand{display:flex;flex-direction:column;align-items:center;gap:5px;background:rgba(0,0,0,.2);border-radius:10px;padding:8px 10px;}
+  .sd-hand{display:flex;flex-direction:column;align-items:center;gap:8px;background:rgba(0,0,0,.2);border-radius:12px;padding:14px 16px;}
   .sd-hand.winner{border:1px solid var(--gold-bright);}
+  .sd-winner-card{width:56px;height:78px;font-size:20px;}
+  .sd-winner-card .suit{font-size:19px;}
   .sd-hand .card-row{justify-content:center;}
   .sd-hand .label{font-size:11px;color:#9fb9ac;font-family:'IBM Plex Mono',monospace;text-transform:uppercase;letter-spacing:.06em;}
   .sd-hand .hand-name{font-size:11.5px;color:var(--gold-bright);font-weight:600;}
@@ -184,6 +186,12 @@
   }
   .opp-seat.active-turn, .player-tag.active-turn{ animation: turnPulse 1.4s ease-in-out infinite; }
 
+  @keyframes speakPulse{
+    0%,100%{ box-shadow:0 0 0 3px rgba(74,158,255,.35); }
+    50%{ box-shadow:0 0 0 6px rgba(74,158,255,.55); }
+  }
+  .opp-seat.speaking, .player-tag.speaking{ border-color:#4a9eff !important; animation: speakPulse 1s ease-in-out infinite; }
+
   @keyframes potBump{
     0%{ transform: scale(1); }
     35%{ transform: scale(1.14); }
@@ -192,7 +200,7 @@
   .pot-badge.pot-bump{ animation: potBump .35s ease; }
 
   /* ---------- Chat & voice ---------- */
-  #chat-toggle-btn, #voice-toggle-btn{
+  #chat-toggle-btn, #voice-toggle-btn, #cam-toggle-btn{
     position:fixed; top:calc(env(safe-area-inset-top) + 8px); z-index:40;
     width:40px;height:40px;border-radius:50%;
     background:rgba(0,0,0,.4); border:1px solid var(--panel-line); color:var(--cream);
@@ -201,11 +209,19 @@
   }
   #chat-toggle-btn{ right:12px; }
   #voice-toggle-btn{ right:60px; }
+  #cam-toggle-btn{ right:108px; }
   #voice-toggle-btn.on{ background:linear-gradient(180deg,#d9b862,var(--gold)); color:#20160a; border-color:var(--gold); }
-  #voice-toggle-btn.muted-indicator{ background:rgba(179,64,44,.5); border-color:var(--red); }
+  #cam-toggle-btn.on{ background:linear-gradient(180deg,#d9b862,var(--gold)); color:#20160a; border-color:var(--gold); }
   .chat-badge{ position:absolute; top:-3px; right:-3px; min-width:16px; height:16px; border-radius:8px;
     background:var(--red); color:#fff; font-size:9px; font-family:'IBM Plex Mono',monospace;
     display:flex; align-items:center; justify-content:center; padding:0 3px; }
+
+  #video-layer{ position:fixed; inset:0; pointer-events:none; z-index:15; overflow:visible; }
+  .seat-video{
+    position:fixed; object-fit:cover; border-radius:50%;
+    border:2px solid var(--gold); background:#000;
+  }
+  .seat-video.local-mirror{ transform:scaleX(-1); } /* mirror only my own camera preview */
 
   .chat-panel{
     position:fixed; left:0; right:0; bottom:0; background:var(--panel);
@@ -417,6 +433,7 @@
 </button>
 
 <button id="voice-toggle-btn" onclick="toggleVoice()" style="display:none;">🎤</button>
+<button id="cam-toggle-btn" onclick="toggleCamera()" style="display:none;">📷</button>
 
 <div class="chat-panel" id="chat-panel">
   <div class="chat-header">
@@ -431,6 +448,7 @@
 </div>
 
 <div id="fx-layer"></div>
+<div id="video-layer"></div>
 
 <div id="showdown-overlay">
   <div class="sd-card">
@@ -531,10 +549,16 @@ let chatUnread = 0;
 // Voice (full mesh: everyone calls everyone directly once they enable their mic)
 let seatPeerIds = [];         // host-only: seat -> peerId roster
 let voiceRosterFromHost = []; // guest-only: last roster received from host
-let localStream = null;
+let localStream = null;       // mic audio track source
+let camStream = null;         // camera video track source
+let outboundStream = null;    // combined mic+camera tracks actually sent to peers
 let voiceEnabled = false;
+let camEnabled = false;
 let activeCalls = {};         // peerId -> MediaConnection
 let remoteAudioEls = {};      // peerId -> <audio>
+let videoEls = {};            // seat -> <video> (persistent, positioned over the avatar each render)
+let speakingSeats = new Set();
+let speakingDetectors = {};   // peerId or 'local' -> {timer}
 
 
 function loadPeerJs(){
@@ -1023,21 +1047,21 @@ function applyAction(seat, action, amount){
   if(!game || game.stage==='showdown' || game.stage==='matchover') return;
   if(game.turnSeat !== seat) return;
 
-  function markAction(text){
+  function markAction(text, sfx){
     game.actionSeq = (game.actionSeq||0) + 1;
-    game.lastAction = { seq: game.actionSeq, seat, text };
+    game.lastAction = { seq: game.actionSeq, seat, text, sfx };
   }
 
   if(action === 'fold'){
     game.folded[seat] = true; game.acted[seat] = true;
     game.log = `${nameOf(seat)} folds`;
-    markAction('Folds');
+    markAction('Folds', 'fold');
     hostAdvanceTurn(); return;
   }
   if(action === 'checkcall'){
     const toCall = game.currentBet - game.betsThisStreet[seat];
-    if(toCall <= 0){ game.acted[seat]=true; game.log = `${nameOf(seat)} checks`; markAction('Checks'); }
-    else{ const callAmt = Math.min(toCall, game.stacks[seat]); postBet(seat, callAmt); game.acted[seat]=true; game.log = `${nameOf(seat)} calls ${callAmt}`; markAction(`Calls ${callAmt}`); }
+    if(toCall <= 0){ game.acted[seat]=true; game.log = `${nameOf(seat)} checks`; markAction('Checks', 'check'); }
+    else{ const callAmt = Math.min(toCall, game.stacks[seat]); postBet(seat, callAmt); game.acted[seat]=true; game.log = `${nameOf(seat)} calls ${callAmt}`; markAction(`Calls ${callAmt}`, 'call'); }
     hostAdvanceTurn(); return;
   }
   if(action === 'raise'){
@@ -1053,7 +1077,7 @@ function applyAction(seat, action, amount){
     const isAllIn = game.stacks[seat]===0;
     const verb = isAllIn ? 'goes all-in for' : 'bets to';
     game.log = `${nameOf(seat)} ${verb} ${target}`;
-    markAction(isAllIn ? `All-in! ${target}` : `Raises to ${target}`);
+    markAction(isAllIn ? `All-in! ${target}` : `Raises to ${target}`, isAllIn ? 'allin' : 'raise');
     hostAdvanceTurn(); return;
   }
 }
@@ -1180,11 +1204,14 @@ function confirmRaise(){
   toggleRaisePanel();
 }
 
+let iReadyForHandNum = null;
 function requestNextHand(){
+  if(myView) iReadyForHandNum = myView.handNum;
   if(isHost){ readyForNext.add(0); maybeStartNextHand(); }
   else sendToHost({type:'requestNextHand'});
-  document.getElementById('btn-next-hand').disabled = true;
-  document.getElementById('btn-next-hand').textContent = 'Waiting for others…';
+  const btn = document.getElementById('btn-next-hand');
+  btn.disabled = true;
+  btn.textContent = isHost ? 'Waiting for other players…' : 'Waiting for host to start…';
 }
 
 /* ============================================================
@@ -1244,6 +1271,7 @@ function addChatMessage(msg){
   if(!isMine){
     if(!chatOpen){ chatUnread++; updateChatBadge(); }
     spawnChatPreviewBubble(`${msg.name}: ${msg.text}`);
+    playChatSound();
   }
 }
 
@@ -1268,14 +1296,31 @@ function renderChatMessage(msg){
    ============================================================ */
 function resetVoiceState(){
   voiceEnabled = false;
+  camEnabled = false;
   if(localStream){ try{ localStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
   localStream = null;
+  if(camStream){ try{ camStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
+  camStream = null;
+  outboundStream = null;
   Object.values(activeCalls).forEach(c=>{ try{ c.close(); }catch(e){} });
   activeCalls = {};
   Object.values(remoteAudioEls).forEach(el=>el.remove());
   remoteAudioEls = {};
+  Object.values(videoEls).forEach(el=>el.remove());
+  videoEls = {};
   voiceRosterFromHost = [];
+  Object.keys(speakingDetectors).forEach(stopSpeakingDetector);
+  speakingSeats = new Set();
   updateVoiceButton();
+  updateCameraButton();
+}
+
+function rebuildOutboundStream(){
+  const tracks = [];
+  if(localStream) tracks.push(...localStream.getAudioTracks());
+  if(camStream) tracks.push(...camStream.getVideoTracks());
+  outboundStream = tracks.length ? new MediaStream(tracks) : null;
+  return outboundStream;
 }
 
 function currentVoiceRoster(){
@@ -1296,34 +1341,71 @@ async function toggleVoice(){
     }
     voiceEnabled = true;
     updateVoiceButton();
+    rebuildOutboundStream();
     connectVoiceToAll();
-    toast('Voice chat on');
+    startSpeakingDetector('local', localStream);
+    toast('Mic on');
   } else {
-    resetVoiceState();
-    toast('Voice chat off');
+    // Soft mute: stop sending our own audio, but leave existing connections
+    // open so we keep hearing anyone else who's still broadcasting.
+    voiceEnabled = false;
+    if(localStream){ try{ localStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
+    localStream = null;
+    stopSpeakingDetector('local');
+    updateVoiceButton();
+    toast('Mic off — you can still hear others');
+  }
+}
+
+async function toggleCamera(){
+  if(!camEnabled){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      toast('This browser does not support camera access');
+      return;
+    }
+    try{
+      camStream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'user', width:{ideal:320} }, audio:false });
+    }catch(err){
+      toast('Camera permission denied or unavailable');
+      return;
+    }
+    camEnabled = true;
+    updateCameraButton();
+    rebuildOutboundStream();
+    connectVoiceToAll();
+    showLocalVideoPreview();
+    toast('Camera on');
+  } else {
+    camEnabled = false;
+    if(camStream){ try{ camStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
+    camStream = null;
+    updateCameraButton();
+    hideLocalVideoPreview();
+    toast('Camera off');
   }
 }
 
 function connectVoiceToAll(){
-  if(!voiceEnabled || !localStream || !peer) return;
+  if(!outboundStream || !peer) return;
   const myId = peer.id;
   currentVoiceRoster().forEach(pid=>{
     if(!pid || pid===myId) return;
-    if(activeCalls[pid]) return;
+    // Hang up any stale/receive-only connection first so the fresh one carries our current stream.
+    if(activeCalls[pid]){ try{ activeCalls[pid].close(); }catch(e){} delete activeCalls[pid]; }
     try{
-      const call = peer.call(pid, localStream);
+      const call = peer.call(pid, outboundStream);
       if(call) wireMediaCall(call, pid);
     }catch(e){ console.warn('voice call failed', e); }
   });
 }
 
 function handleIncomingCall(call){
-  if(voiceEnabled && localStream){
-    call.answer(localStream);
+  // Always answer, even if we're not currently sending anything — this lets a
+  // muted/listen-only player still hear and see anyone else who is broadcasting.
+  try{
+    call.answer(outboundStream || undefined);
     wireMediaCall(call, call.peer);
-  }
-  // If we're not in voice right now, we simply don't answer — the caller's
-  // call attempt will just go unanswered rather than erroring out.
+  }catch(e){ console.warn('answer failed', e); }
 }
 
 function wireMediaCall(call, pid){
@@ -1339,8 +1421,30 @@ function wireMediaCall(call, pid){
       remoteAudioEls[pid] = audioEl;
     }
     audioEl.srcObject = remoteStream;
+    startSpeakingDetector(pid, remoteStream);
+
+    // Visual-only video overlay (muted — audio already plays via the <audio> element above,
+    // so we don't want to double-play it through the video element too).
+    const seat = peerIdToSeat(pid);
+    if(seat >= 0){
+      const hasVideo = remoteStream.getVideoTracks().length > 0;
+      if(hasVideo){
+        const vEl = getOrCreateVideoEl(seat, true);
+        vEl.srcObject = remoteStream;
+        vEl.dataset.hasVideo = '1';
+      } else if(videoEls[seat]){
+        videoEls[seat].dataset.hasVideo = '0';
+      }
+      positionVideoOverlays();
+    }
   });
-  call.on('close', ()=>{ delete activeCalls[pid]; if(remoteAudioEls[pid]){ remoteAudioEls[pid].remove(); delete remoteAudioEls[pid]; } });
+  call.on('close', ()=>{
+    delete activeCalls[pid];
+    if(remoteAudioEls[pid]){ remoteAudioEls[pid].remove(); delete remoteAudioEls[pid]; }
+    stopSpeakingDetector(pid);
+    const seat = peerIdToSeat(pid);
+    if(seat >= 0 && videoEls[seat]){ videoEls[seat].dataset.hasVideo = '0'; positionVideoOverlays(); }
+  });
   call.on('error', (e)=> console.warn('voice call error', e));
 }
 
@@ -1349,6 +1453,53 @@ function closeVoiceCallForPeer(pid){
   const call = activeCalls[pid];
   if(call){ try{ call.close(); }catch(e){} delete activeCalls[pid]; }
   if(remoteAudioEls[pid]){ remoteAudioEls[pid].remove(); delete remoteAudioEls[pid]; }
+  stopSpeakingDetector(pid);
+}
+
+function peerIdToSeat(pid){
+  const roster = currentVoiceRoster();
+  return roster.indexOf(pid);
+}
+
+function startSpeakingDetector(key, stream){
+  stopSpeakingDetector(key);
+  const ctx = getSfxCtx();
+  if(!ctx || !stream.getAudioTracks().length) return;
+  try{
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.7;
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const timer = setInterval(()=>{
+      analyser.getByteFrequencyData(data);
+      let sum = 0;
+      for(let i=0;i<data.length;i++) sum += data[i];
+      const avg = sum / data.length;
+      setSeatSpeakingByKey(key, avg > 14);
+    }, 150);
+    speakingDetectors[key] = { timer, source };
+  }catch(e){ /* ignore — speaking indicator is a nice-to-have, not critical */ }
+}
+function stopSpeakingDetector(key){
+  const d = speakingDetectors[key];
+  if(d){ clearInterval(d.timer); delete speakingDetectors[key]; }
+  setSeatSpeakingByKey(key, false);
+}
+function setSeatSpeakingByKey(key, speaking){
+  const seat = (key === 'local') ? mySeatNum() : peerIdToSeat(key);
+  if(seat === null || seat === undefined || seat < 0) return;
+  if(speaking) speakingSeats.add(seat); else speakingSeats.delete(seat);
+  updateSpeakingClasses();
+}
+function updateSpeakingClasses(){
+  document.querySelectorAll('.opp-seat').forEach(el=>{
+    const seat = Number(el.dataset.seat);
+    el.classList.toggle('speaking', speakingSeats.has(seat));
+  });
+  const meTag = document.getElementById('me-tag');
+  if(meTag) meTag.classList.toggle('speaking', speakingSeats.has(mySeatNum()));
 }
 
 function updateVoiceButton(){
@@ -1357,6 +1508,66 @@ function updateVoiceButton(){
   btn.classList.toggle('on', voiceEnabled);
   btn.textContent = voiceEnabled ? '🎤' : '🔇';
 }
+
+function updateCameraButton(){
+  const btn = document.getElementById('cam-toggle-btn');
+  if(!btn) return;
+  btn.classList.toggle('on', camEnabled);
+  btn.textContent = camEnabled ? '📹' : '📷';
+}
+
+function getOrCreateVideoEl(seat, muted){
+  if(videoEls[seat]) return videoEls[seat];
+  const v = document.createElement('video');
+  v.autoplay = true;
+  v.playsInline = true;
+  v.muted = !!muted;
+  v.className = 'seat-video';
+  v.dataset.hasVideo = '0';
+  document.getElementById('video-layer').appendChild(v);
+  videoEls[seat] = v;
+  return v;
+}
+
+function showLocalVideoPreview(){
+  const mySeat = mySeatNum();
+  if(mySeat === null || mySeat === undefined || mySeat < 0) return;
+  const vEl = getOrCreateVideoEl(mySeat, true); // muted — it's my own camera, I don't need to hear myself
+  vEl.classList.add('local-mirror');
+  vEl.srcObject = camStream;
+  vEl.dataset.hasVideo = '1';
+  positionVideoOverlays();
+}
+function hideLocalVideoPreview(){
+  const mySeat = mySeatNum();
+  if(videoEls[mySeat]){ videoEls[mySeat].dataset.hasVideo = '0'; positionVideoOverlays(); }
+}
+
+function positionVideoOverlays(){
+  const oppRow = document.getElementById('opponents-row');
+  Object.keys(videoEls).forEach(seatKey=>{
+    const seat = Number(seatKey);
+    const vEl = videoEls[seat];
+    const show = vEl.dataset.hasVideo === '1';
+    let avatarEl = null;
+    if(seat === mySeatNum()){
+      avatarEl = document.getElementById('me-avatar');
+    } else if(oppRow){
+      avatarEl = oppRow.querySelector(`[data-seat="${seat}"] .avatar`);
+    }
+    if(show && avatarEl){
+      const r = avatarEl.getBoundingClientRect();
+      vEl.style.display = 'block';
+      vEl.style.left = r.left + 'px';
+      vEl.style.top = r.top + 'px';
+      vEl.style.width = r.width + 'px';
+      vEl.style.height = r.height + 'px';
+    } else {
+      vEl.style.display = 'none';
+    }
+  });
+}
+window.addEventListener('resize', ()=>{ if(document.getElementById('table').classList.contains('active')) positionVideoOverlays(); });
 
 /* ============================================================
    RENDERING
@@ -1383,6 +1594,7 @@ function renderTable(){
   document.getElementById('me-stack').textContent = me.stack;
   document.getElementById('me-dealer').style.display = me.isDealer ? 'flex':'none';
   document.getElementById('me-tag').classList.toggle('active-turn', me.isTurn);
+  document.getElementById('me-tag').classList.toggle('speaking', speakingSeats.has(mySeatNum()));
 
   document.getElementById('blind-label').textContent = `${SMALL_BLIND}/${BIG_BLIND}`;
   document.getElementById('stage-pill').textContent = v.stage.charAt(0).toUpperCase()+v.stage.slice(1);
@@ -1414,7 +1626,7 @@ function renderTable(){
   oppRow.innerHTML = '';
   opponents.forEach((o,oi)=>{
     const seatDiv = document.createElement('div');
-    seatDiv.className = 'opp-seat' + (o.isTurn?' active-turn':'') + (o.folded?' folded':'');
+    seatDiv.className = 'opp-seat' + (o.isTurn?' active-turn':'') + (o.folded?' folded':'') + (speakingSeats.has(o.seat)?' speaking':'');
     seatDiv.dataset.seat = o.seat;
     seatDiv.innerHTML = `
       ${o.isDealer?'<div class="dealer-btn">D</div>':''}
@@ -1449,11 +1661,14 @@ function renderTable(){
     }
   }
   lastCommunityCountForDeal = v.community.length;
+  if(isNewHand && lastSoundedHandNum !== v.handNum){ lastSoundedHandNum = v.handNum; playDealSound(); }
   lastHandNumForDeal = v.handNum;
+  positionVideoOverlays();
 
-  // Floating action bubble for whoever just acted
+  // Floating action bubble (+ sound) for whoever just acted
   if(v.lastAction && v.lastAction.seq !== lastRenderedActionSeq){
     lastRenderedActionSeq = v.lastAction.seq;
+    playActionSound(v.lastAction.sfx);
     let targetEl = (v.lastAction.seat === v.mySeat)
       ? document.getElementById('me-tag')
       : oppRow.querySelector(`[data-seat="${v.lastAction.seat}"]`);
@@ -1476,21 +1691,75 @@ function renderTable(){
 
   if(isShowdown){
     const matchOver = allEliminatedExceptOne(v);
-    document.getElementById('btn-next-hand').disabled = !v.readyNeededForMe ? true : false;
+    const btn = document.getElementById('btn-next-hand');
+    const alreadyReady = (iReadyForHandNum === v.handNum);
     if(!v.readyNeededForMe){
-      document.getElementById('btn-next-hand').style.display = 'none';
+      btn.style.display = 'none';
     } else {
-      document.getElementById('btn-next-hand').style.display = 'block';
-      document.getElementById('btn-next-hand').disabled = false;
-      document.getElementById('btn-next-hand').textContent = matchOver ? 'Start new match' : 'Deal next hand';
+      btn.style.display = 'block';
+      if(alreadyReady){
+        btn.disabled = true;
+        btn.textContent = isHost ? 'Waiting for other players…' : 'Waiting for host to start…';
+      } else {
+        btn.disabled = false;
+        btn.textContent = matchOver ? 'Start new match' : 'Deal next hand';
+      }
     }
     if(v.handNum !== dismissedShowdownForHand){ showShowdownOverlay(v); }
+    if(lastSoundedShowdownHandNum !== v.handNum){ lastSoundedShowdownHandNum = v.handNum; playWinSound(); }
   }
 }
 
 let lastHandNumForDeal = null;
 let lastCommunityCountForDeal = 0;
 let lastRenderedActionSeq = null;
+let lastSoundedHandNum = null;
+let lastSoundedShowdownHandNum = null;
+
+/* ============================================================
+   SOUND EFFECTS — synthesized with the Web Audio API so there's
+   no dependency on external audio files.
+   ============================================================ */
+let sfxCtx = null;
+function getSfxCtx(){
+  if(!sfxCtx){
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return null;
+    sfxCtx = new AC();
+  }
+  if(sfxCtx.state === 'suspended'){ sfxCtx.resume().catch(()=>{}); }
+  return sfxCtx;
+}
+function playTone(freqStart, freqEnd, duration, type, gainPeak, delay){
+  const ctx = getSfxCtx();
+  if(!ctx) return;
+  try{
+    const startAt = ctx.currentTime + (delay||0);
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(Math.max(freqStart,1), startAt);
+    if(freqEnd !== freqStart) osc.frequency.exponentialRampToValueAtTime(Math.max(freqEnd,1), startAt+duration);
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.exponentialRampToValueAtTime(Math.max(gainPeak,0.001), startAt+0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt+duration);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(startAt); osc.stop(startAt+duration+0.03);
+  }catch(e){ /* ignore audio errors */ }
+}
+function playActionSound(type){
+  switch(type){
+    case 'fold': playTone(320,150,0.22,'triangle',0.10); break;
+    case 'check': playTone(520,520,0.07,'square',0.07); break;
+    case 'call': playTone(440,440,0.055,'square',0.09); playTone(440,440,0.055,'square',0.09,0.09); break;
+    case 'raise': playTone(320,760,0.2,'sawtooth',0.09); break;
+    case 'allin': playTone(200,950,0.42,'sawtooth',0.13); break;
+    default: break;
+  }
+}
+function playDealSound(){ playTone(700,900,0.09,'sine',0.06); playTone(900,1100,0.09,'sine',0.06,0.06); }
+function playWinSound(){ playTone(500,700,0.16,'sine',0.12); playTone(700,1000,0.22,'sine',0.12,0.14); }
+function playChatSound(){ playTone(900,900,0.05,'sine',0.05); }
 
 function placeBubbleClamped(bubble, centerX, topY){
   bubble.style.left = centerX + 'px';
@@ -1575,28 +1844,23 @@ function showShowdownOverlay(v){
 
   const handsEl = document.getElementById('sd-hands');
   handsEl.innerHTML = '';
-  const revealSeats = v.showdown.revealSeats && v.showdown.revealSeats.length ? v.showdown.revealSeats : v.seats.filter(s=>s.hole).map(s=>s.seat);
 
-  v.seats.forEach(s=>{
-    if(!revealSeats.includes(s.seat) && !s.isMe) return;
-    if(s.folded && !s.isMe) return;
+  winnerSeats.forEach(seat=>{
+    const s = v.seats.find(x=>x.seat===seat);
+    if(!s || !s.hole) return;
+    const combo = v.showdown.handCards && v.showdown.handCards[seat];
     const wrap = document.createElement('div');
-    wrap.className = 'sd-hand' + (winnerSeats.has(s.seat)?' winner':'');
+    wrap.className = 'sd-hand winner';
     const lab = document.createElement('div'); lab.className='label'; lab.textContent = s.isMe ? 'You' : s.name;
     const row = document.createElement('div'); row.className='card-row';
-    const cards = s.hole;
-    const combo = v.showdown.handCards && v.showdown.handCards[s.seat];
-    if(cards){
-      cards.forEach(c=>{
-        const el = cardEl(c);
-        if(combo && combo.some(cc=>cardKey(cc)===cardKey(c))) el.classList.add('wc-highlight');
-        row.appendChild(el);
-      });
-    } else {
-      row.appendChild(cardEl(null,{back:true})); row.appendChild(cardEl(null,{back:true}));
-    }
+    s.hole.forEach(c=>{
+      const el = cardEl(c);
+      el.classList.add('sd-winner-card');
+      if(combo && combo.some(cc=>cardKey(cc)===cardKey(c))) el.classList.add('wc-highlight');
+      row.appendChild(el);
+    });
     const hn = document.createElement('div'); hn.className='hand-name';
-    hn.textContent = (v.showdown.handNames && v.showdown.handNames[s.seat]) || (s.folded?'Folded':'');
+    hn.textContent = (v.showdown.handNames && v.showdown.handNames[seat]) || '';
     wrap.appendChild(lab); wrap.appendChild(row); wrap.appendChild(hn);
     handsEl.appendChild(wrap);
   });
@@ -1618,6 +1882,7 @@ function goTo(id){
   const onTable = id === 'table';
   document.getElementById('chat-toggle-btn').style.display = onTable ? 'flex' : 'none';
   document.getElementById('voice-toggle-btn').style.display = onTable ? 'flex' : 'none';
+  document.getElementById('cam-toggle-btn').style.display = onTable ? 'flex' : 'none';
   if(!onTable){
     document.getElementById('chat-panel').classList.remove('open');
     chatOpen = false;
