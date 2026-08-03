@@ -115,7 +115,7 @@
   .community-zone{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:8px;}
   .pot-badge{font-family:'Fraunces',serif;font-size:15px;color:var(--gold-bright);background:rgba(0,0,0,.3);border:1px solid var(--panel-line);
     padding:6px 16px;border-radius:20px;}
-  .log-line{font-family:'IBM Plex Mono',monospace;font-size:11px;color:#9fb9ac;min-height:16px;text-align:center;padding:0 20px;}
+  .log-line{font-family:'IBM Plex Mono',monospace;font-size:11px;color:#9fb9ac;height:16px;line-height:16px;text-align:center;padding:0 20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .card-row{display:flex;gap:6px;}
 
   .me-zone{padding:0 16px 6px;display:flex;flex-direction:column;align-items:center;gap:8px;margin-top:auto;}
@@ -147,7 +147,7 @@
     font-size:12px;font-family:'IBM Plex Mono',monospace;}
   .wait-msg,.spectator-msg{text-align:center;font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#9fb9ac;padding:14px 6px;}
 
-  #showdown-overlay{position:fixed;inset:0;background:rgba(4,10,8,.86);display:none;align-items:center;justify-content:center;padding:20px;z-index:50;overflow-y:auto;}
+  #showdown-overlay{position:fixed;inset:0;background:rgba(4,10,8,.86);display:none;padding:20px;z-index:50;overflow-y:auto;}
   #showdown-overlay.open{display:flex;}
   .sd-card{background:var(--panel);border:1px solid var(--gold);border-radius:18px;padding:24px 20px;max-width:400px;width:100%;text-align:center;margin:auto;}
   .sd-card h2{margin:0 0 10px;font-size:21px;color:var(--gold-bright);}
@@ -212,6 +212,14 @@
   #cam-toggle-btn{ right:108px; }
   #voice-toggle-btn.on{ background:linear-gradient(180deg,#d9b862,var(--gold)); color:#20160a; border-color:var(--gold); }
   #cam-toggle-btn.on{ background:linear-gradient(180deg,#d9b862,var(--gold)); color:#20160a; border-color:var(--gold); }
+
+  #mic-volume-row{
+    position:fixed; top:calc(env(safe-area-inset-top) + 54px); right:12px; z-index:40;
+    display:flex; align-items:center; gap:6px;
+    background:rgba(0,0,0,.45); border:1px solid var(--panel-line); border-radius:20px;
+    padding:6px 10px; font-size:12px;
+  }
+  #mic-volume-row input[type=range]{ width:90px; accent-color:var(--gold); }
   .chat-badge{ position:absolute; top:-3px; right:-3px; min-width:16px; height:16px; border-radius:8px;
     background:var(--red); color:#fff; font-size:9px; font-family:'IBM Plex Mono',monospace;
     display:flex; align-items:center; justify-content:center; padding:0 3px; }
@@ -220,6 +228,7 @@
   .seat-video{
     position:fixed; object-fit:cover; border-radius:50%;
     border:2px solid var(--gold); background:#000;
+    transition: left .2s ease, top .2s ease, width .2s ease, height .2s ease;
   }
   .seat-video.local-mirror{ transform:scaleX(-1); } /* mirror only my own camera preview */
 
@@ -435,6 +444,12 @@
 <button id="voice-toggle-btn" onclick="toggleVoice()" style="display:none;">🎤</button>
 <button id="cam-toggle-btn" onclick="toggleCamera()" style="display:none;">📷</button>
 
+<div id="mic-volume-row" style="display:none;">
+  <span>🔉</span>
+  <input type="range" id="mic-volume-slider" min="0" max="200" value="100" oninput="onMicVolumeChange()">
+  <span>🔊</span>
+</div>
+
 <div class="chat-panel" id="chat-panel">
   <div class="chat-header">
     <span>Table chat</span>
@@ -549,7 +564,10 @@ let chatUnread = 0;
 // Voice (full mesh: everyone calls everyone directly once they enable their mic)
 let seatPeerIds = [];         // host-only: seat -> peerId roster
 let voiceRosterFromHost = []; // guest-only: last roster received from host
-let localStream = null;       // mic audio track source
+let rawMicStream = null;      // unprocessed hardware mic capture (needed so we can actually release the mic on mute)
+let localStream = null;       // gain-adjusted mic audio actually sent to peers
+let micGainNode = null;
+let micGainValue = 1;         // 1.0 = 100%
 let camStream = null;         // camera video track source
 let outboundStream = null;    // combined mic+camera tracks actually sent to peers
 let voiceEnabled = false;
@@ -1297,8 +1315,11 @@ function renderChatMessage(msg){
 function resetVoiceState(){
   voiceEnabled = false;
   camEnabled = false;
+  if(rawMicStream){ try{ rawMicStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
+  rawMicStream = null;
   if(localStream){ try{ localStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
   localStream = null;
+  micGainNode = null;
   if(camStream){ try{ camStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
   camStream = null;
   outboundStream = null;
@@ -1313,6 +1334,7 @@ function resetVoiceState(){
   speakingSeats = new Set();
   updateVoiceButton();
   updateCameraButton();
+  updateMicVolumeUI();
 }
 
 function rebuildOutboundStream(){
@@ -1327,37 +1349,84 @@ function currentVoiceRoster(){
   return (isHost ? seatPeerIds : voiceRosterFromHost) || [];
 }
 
-async function toggleVoice(){
+let mediaOpChain = Promise.resolve();
+function queueMediaOp(fn){
+  const run = ()=> Promise.resolve().then(fn).catch(e=>console.warn('media op error', e));
+  mediaOpChain = mediaOpChain.then(run, run);
+  return mediaOpChain;
+}
+let reconnectTimer = null;
+function scheduleReconnect(){
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connectVoiceToAll, 400);
+}
+
+function toggleVoice(){ return queueMediaOp(_toggleVoiceImpl); }
+async function _toggleVoiceImpl(){
   if(!voiceEnabled){
     if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
       toast('This browser does not support microphone access');
       return;
     }
     try{
-      localStream = await navigator.mediaDevices.getUserMedia({audio:true, video:false});
+      rawMicStream = await navigator.mediaDevices.getUserMedia({audio:true, video:false});
     }catch(err){
       toast('Microphone permission denied or unavailable');
       return;
     }
+    const ctx = getSfxCtx();
+    if(ctx){
+      try{
+        const source = ctx.createMediaStreamSource(rawMicStream);
+        micGainNode = ctx.createGain();
+        micGainNode.gain.value = micGainValue;
+        const dest = ctx.createMediaStreamDestination();
+        source.connect(micGainNode);
+        micGainNode.connect(dest);
+        localStream = dest.stream;
+      }catch(e){
+        console.warn('mic gain routing failed, using raw stream', e);
+        localStream = rawMicStream;
+        micGainNode = null;
+      }
+    } else {
+      localStream = rawMicStream;
+    }
     voiceEnabled = true;
     updateVoiceButton();
+    updateMicVolumeUI();
     rebuildOutboundStream();
-    connectVoiceToAll();
+    scheduleReconnect();
     startSpeakingDetector('local', localStream);
     toast('Mic on');
   } else {
     // Soft mute: stop sending our own audio, but leave existing connections
     // open so we keep hearing anyone else who's still broadcasting.
     voiceEnabled = false;
+    if(rawMicStream){ try{ rawMicStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
+    rawMicStream = null;
     if(localStream){ try{ localStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
     localStream = null;
+    micGainNode = null;
     stopSpeakingDetector('local');
     updateVoiceButton();
+    updateMicVolumeUI();
     toast('Mic off — you can still hear others');
   }
 }
 
-async function toggleCamera(){
+function onMicVolumeChange(){
+  const pct = Number(document.getElementById('mic-volume-slider').value);
+  micGainValue = pct / 100;
+  if(micGainNode) micGainNode.gain.value = micGainValue;
+}
+function updateMicVolumeUI(){
+  const row = document.getElementById('mic-volume-row');
+  if(row) row.style.display = voiceEnabled ? 'flex' : 'none';
+}
+
+function toggleCamera(){ return queueMediaOp(_toggleCameraImpl); }
+async function _toggleCameraImpl(){
   if(!camEnabled){
     if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
       toast('This browser does not support camera access');
@@ -1372,7 +1441,7 @@ async function toggleCamera(){
     camEnabled = true;
     updateCameraButton();
     rebuildOutboundStream();
-    connectVoiceToAll();
+    scheduleReconnect();
     showLocalVideoPreview();
     toast('Camera on');
   } else {
@@ -1439,6 +1508,11 @@ function wireMediaCall(call, pid){
     }
   });
   call.on('close', ()=>{
+    // Only tear down bookkeeping if this close event is for the call we
+    // currently have on file — a rapid mic+camera toggle can create a fresh
+    // replacement call before the old one's close event arrives, and without
+    // this check the old call's cleanup could wipe out the new one.
+    if(activeCalls[pid] !== call) return;
     delete activeCalls[pid];
     if(remoteAudioEls[pid]){ remoteAudioEls[pid].remove(); delete remoteAudioEls[pid]; }
     stopSpeakingDetector(pid);
@@ -1545,23 +1619,27 @@ function hideLocalVideoPreview(){
 
 function positionVideoOverlays(){
   const oppRow = document.getElementById('opponents-row');
+  const mySeat = mySeatNum();
   Object.keys(videoEls).forEach(seatKey=>{
     const seat = Number(seatKey);
     const vEl = videoEls[seat];
     const show = vEl.dataset.hasVideo === '1';
     let avatarEl = null;
-    if(seat === mySeatNum()){
+    if(seat === mySeat){
       avatarEl = document.getElementById('me-avatar');
     } else if(oppRow){
       avatarEl = oppRow.querySelector(`[data-seat="${seat}"] .avatar`);
     }
     if(show && avatarEl){
       const r = avatarEl.getBoundingClientRect();
+      const cx = r.left + r.width/2;
+      const cy = r.top + r.height/2;
+      const size = (seat === mySeat) ? 72 : 60; // bigger than the tiny avatar so it's actually easy to see
       vEl.style.display = 'block';
-      vEl.style.left = r.left + 'px';
-      vEl.style.top = r.top + 'px';
-      vEl.style.width = r.width + 'px';
-      vEl.style.height = r.height + 'px';
+      vEl.style.width = size + 'px';
+      vEl.style.height = size + 'px';
+      vEl.style.left = (cx - size/2) + 'px';
+      vEl.style.top = (cy - size/2) + 'px';
     } else {
       vEl.style.display = 'none';
     }
@@ -1844,23 +1922,26 @@ function showShowdownOverlay(v){
 
   const handsEl = document.getElementById('sd-hands');
   handsEl.innerHTML = '';
+  const revealSeats = v.showdown.revealSeats && v.showdown.revealSeats.length ? v.showdown.revealSeats : v.seats.filter(s=>s.hole).map(s=>s.seat);
 
-  winnerSeats.forEach(seat=>{
-    const s = v.seats.find(x=>x.seat===seat);
-    if(!s || !s.hole) return;
-    const combo = v.showdown.handCards && v.showdown.handCards[seat];
+  v.seats.forEach(s=>{
+    if(!revealSeats.includes(s.seat) && !s.isMe) return;
+    if(s.folded && !s.isMe) return;
+    if(!s.hole) return;
+    const isWinner = winnerSeats.has(s.seat);
+    const combo = isWinner ? (v.showdown.handCards && v.showdown.handCards[s.seat]) : null;
     const wrap = document.createElement('div');
-    wrap.className = 'sd-hand winner';
+    wrap.className = 'sd-hand' + (isWinner ? ' winner' : '');
     const lab = document.createElement('div'); lab.className='label'; lab.textContent = s.isMe ? 'You' : s.name;
     const row = document.createElement('div'); row.className='card-row';
     s.hole.forEach(c=>{
       const el = cardEl(c);
-      el.classList.add('sd-winner-card');
+      if(isWinner) el.classList.add('sd-winner-card');
       if(combo && combo.some(cc=>cardKey(cc)===cardKey(c))) el.classList.add('wc-highlight');
       row.appendChild(el);
     });
     const hn = document.createElement('div'); hn.className='hand-name';
-    hn.textContent = (v.showdown.handNames && v.showdown.handNames[seat]) || '';
+    hn.textContent = (v.showdown.handNames && v.showdown.handNames[s.seat]) || '';
     wrap.appendChild(lab); wrap.appendChild(row); wrap.appendChild(hn);
     handsEl.appendChild(wrap);
   });
@@ -1883,6 +1964,7 @@ function goTo(id){
   document.getElementById('chat-toggle-btn').style.display = onTable ? 'flex' : 'none';
   document.getElementById('voice-toggle-btn').style.display = onTable ? 'flex' : 'none';
   document.getElementById('cam-toggle-btn').style.display = onTable ? 'flex' : 'none';
+  document.getElementById('mic-volume-row').style.display = (onTable && voiceEnabled) ? 'flex' : 'none';
   if(!onTable){
     document.getElementById('chat-panel').classList.remove('open');
     chatOpen = false;
