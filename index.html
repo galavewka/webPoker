@@ -94,8 +94,11 @@
     border:1px solid var(--panel-line);border-radius:14px;padding:9px 11px;min-width:78px;position:relative;}
   .opp-seat.active-turn{border-color:var(--gold-bright);box-shadow:0 0 0 3px rgba(232,200,115,.18);}
   .opp-seat.folded{opacity:.38;}
-  .opp-seat .avatar{width:56px;height:56px;border-radius:50%;background:linear-gradient(160deg,#3a5c4e,#1b332a);border:1px solid var(--gold);
-    display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:var(--gold-bright);font-family:'Fraunces',serif;}
+  .opp-seat .avatar{
+    width:56px;height:56px;border-radius:50%;background:linear-gradient(160deg,#3a5c4e,#1b332a);border:1px solid var(--gold);
+    display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:var(--gold-bright);font-family:'Fraunces',serif;
+    position:relative;overflow:hidden;
+  }
   .opp-seat .oname{font-size:11px;font-weight:600;max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .opp-seat .ostack{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--gold-bright);}
   .opp-seat .obet{font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#8fd0a6;min-height:12px;}
@@ -122,9 +125,12 @@
   .my-cards-row{display:flex;align-items:center;gap:16px;}
   .my-cards-row .card{width:56px;height:78px;font-size:20px;}
   .my-cards-row .card .suit{font-size:19px;}
-  .player-tag{position:relative;display:flex;align-items:center;gap:12px;background:rgba(0,0,0,.28);border:1px solid var(--panel-line);padding:6px 14px 6px 8px;border-radius:30px;}
-  .player-tag .avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(160deg,#3a5c4e,#1b332a);border:1px solid var(--gold);
-    display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:var(--gold-bright);font-family:'Fraunces',serif;}
+  .player-tag{position:relative;display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.28);border:1px solid var(--panel-line);padding:6px 10px 6px 6px;border-radius:30px;}
+  .player-tag .avatar{
+    width:26px;height:26px;border-radius:50%;background:linear-gradient(160deg,#3a5c4e,#1b332a);border:1px solid var(--gold);
+    display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--gold-bright);font-family:'Fraunces',serif;
+    position:relative;overflow:hidden;
+  }
   .player-tag .name{font-size:13px;font-weight:600;}
   .player-tag .stack{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--gold-bright);}
   .player-tag.active-turn{border-color:var(--gold-bright);box-shadow:0 0 0 3px rgba(232,200,115,.18);}
@@ -224,13 +230,11 @@
     background:var(--red); color:#fff; font-size:9px; font-family:'IBM Plex Mono',monospace;
     display:flex; align-items:center; justify-content:center; padding:0 3px; }
 
-  #video-layer{ position:fixed; inset:0; pointer-events:none; z-index:15; overflow:visible; }
   .seat-video{
-    position:fixed; object-fit:cover; border-radius:50%;
-    border:2px solid var(--gold); background:#000; box-sizing: border-box;
-    transition: left .2s ease, top .2s ease, width .2s ease, height .2s ease;
+    position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+    background:#000; z-index:2;
   }
-  .seat-video.local-mirror{ transform:scaleX(-1); } /* mirror only my own camera preview */
+  .seat-video.local-mirror{ transform:scaleX(-1); }
 
   .chat-panel{
     position:fixed; left:0; right:0; bottom:0; background:var(--panel);
@@ -463,7 +467,6 @@
 </div>
 
 <div id="fx-layer"></div>
-<div id="video-layer"></div>
 
 <div id="showdown-overlay">
   <div class="sd-card">
@@ -535,9 +538,6 @@ function handName(score){ return HAND_NAMES[score[0]]; }
 
 /* ============================================================
    PEER-TO-PEER CONNECTING (short 6-digit codes)
-   PeerJS's free public broker is used only to help phones find
-   each other (like a phone book). All gameplay data flows
-   directly device-to-device over WebRTC data channels.
    ============================================================ */
 const PEER_NS = 'huhold6-';
 const STARTING_STACK = 1000, SMALL_BLIND = 10, BIG_BLIND = 20;
@@ -574,7 +574,7 @@ let voiceEnabled = false;
 let camEnabled = false;
 let activeCalls = {};         // peerId -> MediaConnection
 let remoteAudioEls = {};      // peerId -> <audio>
-let videoEls = {};            // seat -> <video> (persistent, positioned over the avatar each render)
+let videoEls = {};            // seat -> <video> (persistent, attached to the avatar)
 let speakingSeats = new Set();
 let speakingDetectors = {};   // peerId or 'local' -> {timer}
 
@@ -649,8 +649,6 @@ async function hostStartHosting(attempt){
       if(idx>=0){
         toast((seatNames[seat]||'A player') + ' disconnected');
         closeVoiceCallForPeer(seatPeerIds[seat]);
-        // Keep their seat/name in place if a game is underway so indices stay stable;
-        // in the lobby, just drop them.
         if(!gameStarted){
           conns.splice(idx,1);
           seatNames.splice(seat,1);
@@ -673,7 +671,6 @@ async function hostStartHosting(attempt){
 }
 
 function renumberConns(){
-  // reassign seat numbers 1..k to remaining conns after someone leaves the lobby
   conns.forEach((c,i)=>{
     c.__seat = i+1;
   });
@@ -894,7 +891,6 @@ function startNewMatch(n){
 function startHand(){
   const handSeats = allSeats().filter(s=>game.stacks[s] > 0);
   if(handSeats.length < 2){
-    // shouldn't normally happen (caller resets stacks first), but guard anyway
     game.stage = 'matchover';
     broadcastState();
     return;
@@ -1047,7 +1043,7 @@ function computeSidePots(){
     if(layerAmount > 0){
       const eligible = allSeats().filter(s=>contribs[s] >= level && !game.folded[s]);
       if(eligible.length > 0) pots.push({amount: layerAmount, eligible});
-      else if(pots.length>0) pots[pots.length-1].amount += layerAmount; // nobody eligible (shouldn't normally happen) — fold into previous
+      else if(pots.length>0) pots[pots.length-1].amount += layerAmount;
     }
     prev = level;
   }
@@ -1459,7 +1455,6 @@ function connectVoiceToAll(){
   const myId = peer.id;
   currentVoiceRoster().forEach(pid=>{
     if(!pid || pid===myId) return;
-    // Hang up any stale/receive-only connection first so the fresh one carries our current stream.
     if(activeCalls[pid]){ try{ activeCalls[pid].close(); }catch(e){} delete activeCalls[pid]; }
     try{
       const call = peer.call(pid, outboundStream);
@@ -1469,8 +1464,6 @@ function connectVoiceToAll(){
 }
 
 function handleIncomingCall(call){
-  // Always answer, even if we're not currently sending anything — this lets a
-  // muted/listen-only player still hear and see anyone else who is broadcasting.
   try{
     call.answer(outboundStream || undefined);
     wireMediaCall(call, call.peer);
@@ -1492,8 +1485,6 @@ function wireMediaCall(call, pid){
     audioEl.srcObject = remoteStream;
     startSpeakingDetector(pid, remoteStream);
 
-    // Visual-only video overlay (muted — audio already plays via the <audio> element above,
-    // so we don't want to double-play it through the video element too).
     const seat = peerIdToSeat(pid);
     if(seat >= 0){
       const hasVideo = remoteStream.getVideoTracks().length > 0;
@@ -1508,10 +1499,6 @@ function wireMediaCall(call, pid){
     }
   });
   call.on('close', ()=>{
-    // Only tear down bookkeeping if this close event is for the call we
-    // currently have on file — a rapid mic+camera toggle can create a fresh
-    // replacement call before the old one's close event arrives, and without
-    // this check the old call's cleanup could wipe out the new one.
     if(activeCalls[pid] !== call) return;
     delete activeCalls[pid];
     if(remoteAudioEls[pid]){ remoteAudioEls[pid].remove(); delete remoteAudioEls[pid]; }
@@ -1554,7 +1541,7 @@ function startSpeakingDetector(key, stream){
       setSeatSpeakingByKey(key, avg > 14);
     }, 150);
     speakingDetectors[key] = { timer, source };
-  }catch(e){ /* ignore — speaking indicator is a nice-to-have, not critical */ }
+  }catch(e){ /* ignore */ }
 }
 function stopSpeakingDetector(key){
   const d = speakingDetectors[key];
@@ -1598,7 +1585,6 @@ function getOrCreateVideoEl(seat, muted){
   v.muted = !!muted;
   v.className = 'seat-video';
   v.dataset.hasVideo = '0';
-  document.getElementById('video-layer').appendChild(v);
   videoEls[seat] = v;
   return v;
 }
@@ -1606,7 +1592,7 @@ function getOrCreateVideoEl(seat, muted){
 function showLocalVideoPreview(){
   const mySeat = mySeatNum();
   if(mySeat === null || mySeat === undefined || mySeat < 0) return;
-  const vEl = getOrCreateVideoEl(mySeat, true); // muted — it's my own camera, I don't need to hear myself
+  const vEl = getOrCreateVideoEl(mySeat, true); 
   vEl.classList.add('local-mirror');
   vEl.srcObject = camStream;
   vEl.dataset.hasVideo = '1';
@@ -1631,21 +1617,16 @@ function positionVideoOverlays(){
       avatarEl = oppRow.querySelector(`[data-seat="${seat}"] .avatar`);
     }
     if(show && avatarEl){
-      const r = avatarEl.getBoundingClientRect();
-      const cx = r.left + r.width/2;
-      const cy = r.top + r.height/2;
-      const size = r.width;
+      if(vEl.parentNode !== avatarEl){
+        avatarEl.appendChild(vEl);
+      }
       vEl.style.display = 'block';
-      vEl.style.width = size + 'px';
-      vEl.style.height = size + 'px';
-      vEl.style.left = (cx - size/2) + 'px';
-      vEl.style.top = (cy - size/2) + 'px';
     } else {
       vEl.style.display = 'none';
+      if(vEl.parentNode) vEl.parentNode.removeChild(vEl);
     }
   });
 }
-window.addEventListener('resize', ()=>{ if(document.getElementById('table').classList.contains('active')) positionVideoOverlays(); });
 
 /* ============================================================
    RENDERING
@@ -1666,6 +1647,9 @@ function renderTable(){
   const v = myView;
   const me = v.seats.find(s=>s.isMe);
   const opponents = v.seats.filter(s=>!s.isMe);
+
+  // Detach all active video tags before wiping innerHTML to prevent media reload stutters
+  Object.values(videoEls).forEach(vEl => { if(vEl.parentNode) vEl.parentNode.removeChild(vEl); });
 
   document.getElementById('me-name').textContent = me.name + ' (You)';
   document.getElementById('me-avatar').textContent = (me.name[0]||'Y').toUpperCase();
@@ -1741,6 +1725,8 @@ function renderTable(){
   lastCommunityCountForDeal = v.community.length;
   if(isNewHand && lastSoundedHandNum !== v.handNum){ lastSoundedHandNum = v.handNum; playDealSound(); }
   lastHandNumForDeal = v.handNum;
+  
+  // Re-attach video tags back to their respective freshly rendered avatars
   positionVideoOverlays();
 
   // Floating action bubble (+ sound) for whoever just acted
@@ -1823,7 +1809,7 @@ function playTone(freqStart, freqEnd, duration, type, gainPeak, delay){
     gain.gain.exponentialRampToValueAtTime(0.0001, startAt+duration);
     osc.connect(gain); gain.connect(ctx.destination);
     osc.start(startAt); osc.stop(startAt+duration+0.03);
-  }catch(e){ /* ignore audio errors */ }
+  }catch(e){ /* ignore */ }
 }
 function playActionSound(type){
   switch(type){
@@ -1896,8 +1882,6 @@ function showShowdownOverlay(v){
   const winnerSeats = new Set();
   (v.showdown.pots||[]).forEach(p=>(p.winners||[]).forEach(w=>winnerSeats.add(w)));
 
-  // Union of community cards that were actually part of any winner's best hand —
-  // highlighted directly on the board instead of in a separate box.
   const boardBlock = document.getElementById('sd-board-block');
   const boardRow = document.getElementById('sd-board-row');
   boardRow.innerHTML = '';
@@ -1973,8 +1957,6 @@ function goTo(id){
 }
 
 function applyTableScale(){
-  // Full-screen layout restored — the table now fills the viewport naturally
-  // via flex/dvh instead of being scaled down inside a fixed-size box.
   const wrapper = document.getElementById('table-scale-wrapper');
   if(wrapper) wrapper.style.transform = 'none';
 }
