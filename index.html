@@ -563,21 +563,21 @@ let chatOpen = false;
 let chatUnread = 0;
 
 // Voice/Video
-let seatPeerIds = [];         
-let voiceRosterFromHost = []; 
-let rawMicStream = null;      
-let localStream = null;       
+let seatPeerIds = [];
+let voiceRosterFromHost = [];
+let rawMicStream = null;
+let localStream = null;       // gain-processed mic audio — this IS what we send as our audio call's stream
 let micGainNode = null;
-let micGainValue = 1;         
-let camStream = null;         
-let outboundStream = null;    
+let micGainValue = 1;
+let camStream = null;         // raw camera video — this IS what we send as our video call's stream
 let voiceEnabled = false;
 let camEnabled = false;
-let activeCalls = {};         
-let remoteAudioEls = {};      
-let videoEls = {};            
+let audioCalls = {};          // peerId -> MediaConnection (audio-only, fully independent of video)
+let videoCalls = {};          // peerId -> MediaConnection (video-only, fully independent of audio)
+let remoteAudioEls = {};
+let videoEls = {};
 let speakingSeats = new Set();
-let speakingDetectors = {};   
+let speakingDetectors = {};
 
 
 function loadPeerJs(){
@@ -722,7 +722,8 @@ function handleHostMessage(seat, msg){
     renderHostLobby();
     broadcastLobby();
     broadcastVoiceRoster();
-    connectVoiceToNewPeers();
+    connectAudioToNewPeers();
+    connectVideoToNewPeers();
     return;
   }
   if(msg.type === 'action'){ applyAction(seat, msg.action, msg.amount); return; }
@@ -799,7 +800,8 @@ function handleGuestMessage(msg){
   }
   if(msg.type === 'voiceRoster'){
     voiceRosterFromHost = msg.peerIds;
-    connectVoiceToNewPeers();
+    connectAudioToNewPeers();
+    connectVideoToNewPeers();
     return;
   }
   if(msg.type === 'lobby'){
@@ -1311,9 +1313,10 @@ function resetVoiceState(){
   micGainNode = null;
   if(camStream){ try{ camStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
   camStream = null;
-  outboundStream = null;
-  Object.values(activeCalls).forEach(c=>{ try{ c.close(); }catch(e){} });
-  activeCalls = {};
+  Object.values(audioCalls).forEach(c=>{ try{ c.close(); }catch(e){} });
+  audioCalls = {};
+  Object.values(videoCalls).forEach(c=>{ try{ c.close(); }catch(e){} });
+  videoCalls = {};
   Object.values(remoteAudioEls).forEach(el=>el.remove());
   remoteAudioEls = {};
   Object.values(videoEls).forEach(el=>el.remove());
@@ -1326,14 +1329,6 @@ function resetVoiceState(){
   updateMicVolumeUI();
 }
 
-function rebuildOutboundStream(){
-  const tracks = [];
-  if(localStream) tracks.push(...localStream.getAudioTracks());
-  if(camStream) tracks.push(...camStream.getVideoTracks());
-  outboundStream = tracks.length ? new MediaStream(tracks) : null;
-  return outboundStream;
-}
-
 function currentVoiceRoster(){
   return (isHost ? seatPeerIds : voiceRosterFromHost) || [];
 }
@@ -1344,10 +1339,15 @@ function queueMediaOp(fn){
   mediaOpChain = mediaOpChain.then(run, run);
   return mediaOpChain;
 }
-let reconnectTimer = null;
-function scheduleReconnect(){
-  clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connectVoiceToAll, 400);
+let audioReconnectTimer = null;
+function scheduleAudioReconnect(){
+  clearTimeout(audioReconnectTimer);
+  audioReconnectTimer = setTimeout(connectAudioToAll, 400);
+}
+let videoReconnectTimer = null;
+function scheduleVideoReconnect(){
+  clearTimeout(videoReconnectTimer);
+  videoReconnectTimer = setTimeout(connectVideoToAll, 400);
 }
 
 function toggleVoice(){ return queueMediaOp(_toggleVoiceImpl); }
@@ -1384,16 +1384,16 @@ async function _toggleVoiceImpl(){
     voiceEnabled = true;
     updateVoiceButton();
     updateMicVolumeUI();
-    rebuildOutboundStream();
     if(isHost && peer) seatPeerIds[0] = peer.id;
     broadcastVoiceRoster();
-    scheduleReconnect();
+    scheduleAudioReconnect();
     startSpeakingDetector('local', localStream);
     toast('Mic on');
   } else {
     // Soft mute: stop sending our own audio, but leave existing connections
-    // open so we keep hearing/seeing anyone else who's still broadcasting,
-    // and they keep hearing/seeing us too if we're still on camera.
+    // (including any video call) open so we keep hearing/seeing anyone else
+    // who's still broadcasting, and they keep hearing/seeing us too if we're
+    // still on camera. This never touches the video call at all.
     voiceEnabled = false;
     if(rawMicStream){ try{ rawMicStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
     rawMicStream = null;
@@ -1403,7 +1403,6 @@ async function _toggleVoiceImpl(){
     stopSpeakingDetector('local');
     updateVoiceButton();
     updateMicVolumeUI();
-    rebuildOutboundStream();
     toast('Mic off — you can still hear others');
   }
 }
@@ -1433,10 +1432,9 @@ async function _toggleCameraImpl(){
     }
     camEnabled = true;
     updateCameraButton();
-    rebuildOutboundStream();
     if(isHost && peer) seatPeerIds[0] = peer.id;
     broadcastVoiceRoster();
-    scheduleReconnect();
+    scheduleVideoReconnect();
     showLocalVideoPreview();
     toast('Camera on');
   } else {
@@ -1444,54 +1442,84 @@ async function _toggleCameraImpl(){
     if(camStream){ try{ camStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
     camStream = null;
     updateCameraButton();
-    rebuildOutboundStream();
     hideLocalVideoPreview();
     toast('Camera off');
   }
 }
 
-function connectVoiceToAll(){
-  // Force-reconnect to everyone with our CURRENT outbound stream. Only call
-  // this for our own explicit mic/camera toggle — any existing call might be
-  // stale (receive-only, or still carrying a track we've since replaced).
+function connectAudioToAll(){
+  // Force-reconnect our AUDIO call to everyone. Only called for our own
+  // explicit mic toggle. Never touches video calls at all.
   if(!peer) return;
   if(isHost) seatPeerIds[0] = peer.id;
-  if(!outboundStream) return; // nothing to send right now, but existing calls (e.g. ones others placed to us) should stay alive so we keep hearing/seeing them
+  if(!localStream) return;
   const myId = peer.id;
   currentVoiceRoster().forEach(pid=>{
     if(!pid || pid===myId) return;
-    if(activeCalls[pid]){ try{ activeCalls[pid].close(); }catch(e){} delete activeCalls[pid]; }
+    if(audioCalls[pid]){ try{ audioCalls[pid].close(); }catch(e){} delete audioCalls[pid]; }
     try{
-      const call = peer.call(pid, outboundStream);
-      if(call) wireMediaCall(call, pid);
-    }catch(e){ console.warn('voice call failed', e); }
+      const call = peer.call(pid, localStream, { metadata:{ kind:'audio' } });
+      if(call) wireAudioCall(call, pid);
+    }catch(e){ console.warn('audio call failed', e); }
+  });
+}
+function connectAudioToNewPeers(){
+  if(!peer || !localStream) return;
+  const myId = peer.id;
+  currentVoiceRoster().forEach(pid=>{
+    if(!pid || pid===myId || audioCalls[pid]) return;
+    try{
+      const call = peer.call(pid, localStream, { metadata:{ kind:'audio' } });
+      if(call) wireAudioCall(call, pid);
+    }catch(e){ console.warn('audio call failed', e); }
   });
 }
 
-function connectVoiceToNewPeers(){
-  // Reach any peer we don't already have a connection to, without touching
-  // existing (working) connections. Used when reacting to a roster change —
-  // e.g. someone else joined or toggled — rather than our own toggle.
-  if(!peer || !outboundStream) return;
+function connectVideoToAll(){
+  // Force-reconnect our VIDEO call to everyone. Only called for our own
+  // explicit camera toggle. Never touches audio calls at all — this is the
+  // actual fix: an audio-only reconnect can no longer drop anyone's video,
+  // because video was never part of that connection to begin with.
+  if(!peer) return;
+  if(isHost) seatPeerIds[0] = peer.id;
+  if(!camStream) return;
   const myId = peer.id;
   currentVoiceRoster().forEach(pid=>{
-    if(!pid || pid===myId || activeCalls[pid]) return;
+    if(!pid || pid===myId) return;
+    if(videoCalls[pid]){ try{ videoCalls[pid].close(); }catch(e){} delete videoCalls[pid]; }
     try{
-      const call = peer.call(pid, outboundStream);
-      if(call) wireMediaCall(call, pid);
-    }catch(e){ console.warn('voice call failed', e); }
+      const call = peer.call(pid, camStream, { metadata:{ kind:'video' } });
+      if(call) wireVideoCall(call, pid);
+    }catch(e){ console.warn('video call failed', e); }
+  });
+}
+function connectVideoToNewPeers(){
+  if(!peer || !camStream) return;
+  const myId = peer.id;
+  currentVoiceRoster().forEach(pid=>{
+    if(!pid || pid===myId || videoCalls[pid]) return;
+    try{
+      const call = peer.call(pid, camStream, { metadata:{ kind:'video' } });
+      if(call) wireVideoCall(call, pid);
+    }catch(e){ console.warn('video call failed', e); }
   });
 }
 
 function handleIncomingCall(call){
+  const kind = call.metadata && call.metadata.kind;
   try{
-    call.answer(outboundStream || undefined);
-    wireMediaCall(call, call.peer);
+    if(kind === 'video'){
+      call.answer(camStream || undefined);
+      wireVideoCall(call, call.peer);
+    } else {
+      call.answer(localStream || undefined);
+      wireAudioCall(call, call.peer);
+    }
   }catch(e){ console.warn('answer failed', e); }
 }
 
-function wireMediaCall(call, pid){
-  activeCalls[pid] = call;
+function wireAudioCall(call, pid){
+  audioCalls[pid] = call;
   call.on('stream', (remoteStream)=>{
     let audioEl = remoteAudioEls[pid];
     if(!audioEl){
@@ -1505,7 +1533,19 @@ function wireMediaCall(call, pid){
     audioEl.srcObject = remoteStream;
     audioEl.play().catch(()=>{});
     startSpeakingDetector(pid, remoteStream);
+  });
+  call.on('close', ()=>{
+    if(audioCalls[pid] !== call) return;
+    delete audioCalls[pid];
+    if(remoteAudioEls[pid]){ remoteAudioEls[pid].remove(); delete remoteAudioEls[pid]; }
+    stopSpeakingDetector(pid);
+  });
+  call.on('error', (e)=> console.warn('audio call error', e));
+}
 
+function wireVideoCall(call, pid){
+  videoCalls[pid] = call;
+  call.on('stream', (remoteStream)=>{
     const seat = peerIdToSeat(pid);
     if(seat >= 0){
       const hasVideo = remoteStream.getVideoTracks().length > 0;
@@ -1514,27 +1554,23 @@ function wireMediaCall(call, pid){
         vEl.srcObject = remoteStream;
         vEl.dataset.hasVideo = '1';
         vEl.play().catch(()=>{});
-      } else if(videoEls[seat]){
-        videoEls[seat].dataset.hasVideo = '0';
       }
       positionVideoOverlays();
     }
   });
   call.on('close', ()=>{
-    if(activeCalls[pid] !== call) return;
-    delete activeCalls[pid];
-    if(remoteAudioEls[pid]){ remoteAudioEls[pid].remove(); delete remoteAudioEls[pid]; }
-    stopSpeakingDetector(pid);
+    if(videoCalls[pid] !== call) return;
+    delete videoCalls[pid];
     const seat = peerIdToSeat(pid);
     if(seat >= 0 && videoEls[seat]){ videoEls[seat].dataset.hasVideo = '0'; positionVideoOverlays(); }
   });
-  call.on('error', (e)=> console.warn('voice call error', e));
+  call.on('error', (e)=> console.warn('video call error', e));
 }
 
 function closeVoiceCallForPeer(pid){
   if(!pid) return;
-  const call = activeCalls[pid];
-  if(call){ try{ call.close(); }catch(e){} delete activeCalls[pid]; }
+  if(audioCalls[pid]){ try{ audioCalls[pid].close(); }catch(e){} delete audioCalls[pid]; }
+  if(videoCalls[pid]){ try{ videoCalls[pid].close(); }catch(e){} delete videoCalls[pid]; }
   if(remoteAudioEls[pid]){ remoteAudioEls[pid].remove(); delete remoteAudioEls[pid]; }
   stopSpeakingDetector(pid);
 }
