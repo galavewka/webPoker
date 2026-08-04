@@ -282,6 +282,7 @@
   /* Winning-hand highlight: applied directly to the board cards and the
      winner's hole cards that made up their best hand — no separate box. */
   .sd-board-block{ margin-bottom:16px; }
+  .sd-board-block .card-row{ justify-content:center; }
   .wc-label{ font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:.05em; color:var(--gold-bright);
     text-transform:uppercase; margin-bottom:10px; }
   .wc-highlight{
@@ -707,9 +708,11 @@ function hostBeginGame(){
   if(total < 2) return;
   const typed = document.getElementById('host-name').value.trim();
   if(typed){ seatNames[0] = typed; myName = typed; }
+  if(peer) seatPeerIds[0] = peer.id;
   gameStarted = true;
   goTo('table');
   startNewMatch(total);
+  broadcastVoiceRoster();
 }
 
 function handleHostMessage(seat, msg){
@@ -732,9 +735,10 @@ function handleHostMessage(seat, msg){
 }
 
 function broadcastVoiceRoster(){
+  if(isHost && peer) seatPeerIds[0] = peer.id;
   const payload = {type:'voiceRoster', peerIds: seatPeerIds.slice()};
   conns.forEach(c=>{ if(c.open) c.send(payload); });
-  if(voiceEnabled) connectVoiceToAll();
+  if(voiceEnabled || camEnabled) connectVoiceToAll();
 }
 
 function broadcastLobby(){
@@ -1112,8 +1116,6 @@ function maybeStartNextHand(){
   }
 }
 
-/* Build the personalized view for a given seat, hiding others' hole cards
-   unless it's showdown and they didn't fold. */
 function buildView(forSeat){
   const seatsInfo = allSeats().map(s=>({
     seat: s,
@@ -1228,8 +1230,6 @@ function requestNextHand(){
 
 /* ============================================================
    TEXT CHAT
-   Routed through the host (star topology) — same connections
-   used for game data.
    ============================================================ */
 function resetChatState(){
   chatLog = [];
@@ -1300,11 +1300,6 @@ function renderChatMessage(msg){
 
 /* ============================================================
    VOICE CHAT
-   Full mesh: once someone taps the mic, they place a direct
-   WebRTC audio call to every other connected peer (using the
-   same PeerJS peer object used for game data). The host relays
-   everyone's peer IDs so each client can find the others —
-   the audio itself never passes through the host.
    ============================================================ */
 function resetVoiceState(){
   voiceEnabled = false;
@@ -1390,11 +1385,15 @@ async function _toggleVoiceImpl(){
     updateVoiceButton();
     updateMicVolumeUI();
     rebuildOutboundStream();
+    if(isHost && peer) seatPeerIds[0] = peer.id;
+    broadcastVoiceRoster();
     scheduleReconnect();
     startSpeakingDetector('local', localStream);
     toast('Mic on');
   } else {
-    // Soft mute locally, but completely sync connection state so tracks reflect correctly
+    // Soft mute: stop sending our own audio, but leave existing connections
+    // open so we keep hearing/seeing anyone else who's still broadcasting,
+    // and they keep hearing/seeing us too if we're still on camera.
     voiceEnabled = false;
     if(rawMicStream){ try{ rawMicStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
     rawMicStream = null;
@@ -1405,7 +1404,6 @@ async function _toggleVoiceImpl(){
     updateVoiceButton();
     updateMicVolumeUI();
     rebuildOutboundStream();
-    scheduleReconnect();
     toast('Mic off — you can still hear others');
   }
 }
@@ -1436,6 +1434,8 @@ async function _toggleCameraImpl(){
     camEnabled = true;
     updateCameraButton();
     rebuildOutboundStream();
+    if(isHost && peer) seatPeerIds[0] = peer.id;
+    broadcastVoiceRoster();
     scheduleReconnect();
     showLocalVideoPreview();
     toast('Camera on');
@@ -1444,21 +1444,16 @@ async function _toggleCameraImpl(){
     if(camStream){ try{ camStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
     camStream = null;
     updateCameraButton();
-    hideLocalVideoPreview();
     rebuildOutboundStream();
-    scheduleReconnect();
+    hideLocalVideoPreview();
     toast('Camera off');
   }
 }
 
 function connectVoiceToAll(){
   if(!peer) return;
-  // If there are no tracks to send, gracefully close active connections
-  if(!outboundStream) {
-    Object.values(activeCalls).forEach(c => { try{ c.close(); }catch(e){} });
-    activeCalls = {};
-    return;
-  }
+  if(isHost) seatPeerIds[0] = peer.id;
+  if(!outboundStream) return; // nothing to send right now, but existing calls (e.g. ones others placed to us) should stay alive so we keep hearing/seeing them
   const myId = peer.id;
   currentVoiceRoster().forEach(pid=>{
     if(!pid || pid===myId) return;
@@ -1490,7 +1485,7 @@ function wireMediaCall(call, pid){
       remoteAudioEls[pid] = audioEl;
     }
     audioEl.srcObject = remoteStream;
-    audioEl.play().catch(()=>{}); // Explicit play to guarantee audio unlocks on reconnect
+    audioEl.play().catch(()=>{});
     startSpeakingDetector(pid, remoteStream);
 
     const seat = peerIdToSeat(pid);
@@ -1500,7 +1495,7 @@ function wireMediaCall(call, pid){
         const vEl = getOrCreateVideoEl(seat, true);
         vEl.srcObject = remoteStream;
         vEl.dataset.hasVideo = '1';
-        vEl.play().catch(()=>{}); // Explicit play guarantees video unfreezes 
+        vEl.play().catch(()=>{});
       } else if(videoEls[seat]){
         videoEls[seat].dataset.hasVideo = '0';
       }
@@ -1605,7 +1600,7 @@ function showLocalVideoPreview(){
   vEl.classList.add('local-mirror');
   vEl.srcObject = camStream;
   vEl.dataset.hasVideo = '1';
-  vEl.play().catch(()=>{}); // Explicit play guarantees video unfreezes 
+  vEl.play().catch(()=>{});
   positionVideoOverlays();
 }
 function hideLocalVideoPreview(){
@@ -1629,7 +1624,6 @@ function positionVideoOverlays(){
     if(show && avatarEl){
       if(vEl.parentNode !== avatarEl){
         avatarEl.appendChild(vEl);
-        // Explicitly start playback any time the video is attached to the DOM
         vEl.play().catch(e=>console.warn('Playback block', e));
       }
       vEl.style.display = 'block';
@@ -1660,7 +1654,6 @@ function renderTable(){
   const me = v.seats.find(s=>s.isMe);
   const opponents = v.seats.filter(s=>!s.isMe);
 
-  // Detach all active video tags before wiping innerHTML to prevent media reload stutters
   Object.values(videoEls).forEach(vEl => { if(vEl.parentNode) vEl.parentNode.removeChild(vEl); });
 
   document.getElementById('me-name').textContent = me.name + ' (You)';
@@ -1738,10 +1731,8 @@ function renderTable(){
   if(isNewHand && lastSoundedHandNum !== v.handNum){ lastSoundedHandNum = v.handNum; playDealSound(); }
   lastHandNumForDeal = v.handNum;
   
-  // Re-attach video tags back to their respective freshly rendered avatars
   positionVideoOverlays();
 
-  // Floating action bubble (+ sound) for whoever just acted
   if(v.lastAction && v.lastAction.seq !== lastRenderedActionSeq){
     lastRenderedActionSeq = v.lastAction.seq;
     playActionSound(v.lastAction.sfx);
@@ -1793,8 +1784,7 @@ let lastSoundedHandNum = null;
 let lastSoundedShowdownHandNum = null;
 
 /* ============================================================
-   SOUND EFFECTS — synthesized with the Web Audio API so there's
-   no dependency on external audio files.
+   SOUND EFFECTS
    ============================================================ */
 let sfxCtx = null;
 function getSfxCtx(){
@@ -1821,7 +1811,7 @@ function playTone(freqStart, freqEnd, duration, type, gainPeak, delay){
     gain.gain.exponentialRampToValueAtTime(0.0001, startAt+duration);
     osc.connect(gain); gain.connect(ctx.destination);
     osc.start(startAt); osc.stop(startAt+duration+0.03);
-  }catch(e){ /* ignore */ }
+  }catch(e){}
 }
 function playActionSound(type){
   switch(type){
@@ -1841,8 +1831,6 @@ function placeBubbleClamped(bubble, centerX, topY){
   bubble.style.left = centerX + 'px';
   bubble.style.top = topY + 'px';
   document.getElementById('fx-layer').appendChild(bubble);
-  // Measure the actual rendered box (text-length dependent) and nudge it
-  // back inside the viewport if it would spill off either edge.
   const margin = 10;
   const rect = bubble.getBoundingClientRect();
   let shift = 0;
