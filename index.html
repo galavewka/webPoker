@@ -722,6 +722,7 @@ function handleHostMessage(seat, msg){
     renderHostLobby();
     broadcastLobby();
     broadcastVoiceRoster();
+    connectVoiceToNewPeers();
     return;
   }
   if(msg.type === 'action'){ applyAction(seat, msg.action, msg.amount); return; }
@@ -738,7 +739,6 @@ function broadcastVoiceRoster(){
   if(isHost && peer) seatPeerIds[0] = peer.id;
   const payload = {type:'voiceRoster', peerIds: seatPeerIds.slice()};
   conns.forEach(c=>{ if(c.open) c.send(payload); });
-  if(voiceEnabled || camEnabled) connectVoiceToAll();
 }
 
 function broadcastLobby(){
@@ -799,7 +799,7 @@ function handleGuestMessage(msg){
   }
   if(msg.type === 'voiceRoster'){
     voiceRosterFromHost = msg.peerIds;
-    if(voiceEnabled || camEnabled) connectVoiceToAll();
+    connectVoiceToNewPeers();
     return;
   }
   if(msg.type === 'lobby'){
@@ -1451,6 +1451,9 @@ async function _toggleCameraImpl(){
 }
 
 function connectVoiceToAll(){
+  // Force-reconnect to everyone with our CURRENT outbound stream. Only call
+  // this for our own explicit mic/camera toggle — any existing call might be
+  // stale (receive-only, or still carrying a track we've since replaced).
   if(!peer) return;
   if(isHost) seatPeerIds[0] = peer.id;
   if(!outboundStream) return; // nothing to send right now, but existing calls (e.g. ones others placed to us) should stay alive so we keep hearing/seeing them
@@ -1458,6 +1461,21 @@ function connectVoiceToAll(){
   currentVoiceRoster().forEach(pid=>{
     if(!pid || pid===myId) return;
     if(activeCalls[pid]){ try{ activeCalls[pid].close(); }catch(e){} delete activeCalls[pid]; }
+    try{
+      const call = peer.call(pid, outboundStream);
+      if(call) wireMediaCall(call, pid);
+    }catch(e){ console.warn('voice call failed', e); }
+  });
+}
+
+function connectVoiceToNewPeers(){
+  // Reach any peer we don't already have a connection to, without touching
+  // existing (working) connections. Used when reacting to a roster change —
+  // e.g. someone else joined or toggled — rather than our own toggle.
+  if(!peer || !outboundStream) return;
+  const myId = peer.id;
+  currentVoiceRoster().forEach(pid=>{
+    if(!pid || pid===myId || activeCalls[pid]) return;
     try{
       const call = peer.call(pid, outboundStream);
       if(call) wireMediaCall(call, pid);
