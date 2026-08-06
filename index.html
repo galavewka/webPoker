@@ -69,7 +69,7 @@
   .slider-row input[type=range]{flex:1;accent-color:var(--gold);}
   .slider-amt{font-family:'IBM Plex Mono',monospace;color:var(--gold-bright);font-weight:700;font-size:20px;min-width:26px;text-align:center;}
 
-  .lobby-list{display:flex;flex-direction:column;gap:8px;margin-top:4px;}
+  .lobby-list{display:flex;flex-direction:column;gap:8px;margin-top:4px;max-height:220px;overflow-y:auto;scrollbar-width:thin;}
   .lobby-row{display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.22);border:1px solid var(--panel-line);border-radius:10px;padding:8px 10px;}
   .lobby-row .avatar{width:26px;height:26px;border-radius:50%;background:linear-gradient(160deg,#3a5c4e,#1b332a);border:1px solid var(--gold);
     display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--gold-bright);font-family:'Fraunces',serif;flex:none;}
@@ -260,8 +260,6 @@
   .chat-input-row button{ padding:10px 16px; border-radius:20px; border:none;
     background:linear-gradient(180deg,#d9b862,var(--gold)); color:#20160a; font-weight:700; cursor:pointer; }
 
-  /* Fixed overlay layer for action bubbles + chat preview toasts — sits above everything,
-     positioned via getBoundingClientRect so it's never clipped by scroll containers. */
   #fx-layer{ position:fixed; inset:0; pointer-events:none; z-index:55; overflow:visible; }
   .fx-bubble{
     position:fixed; transform:translate(-50%,0);
@@ -279,8 +277,6 @@
   }
   .fx-bubble.chat-preview{ border-color:var(--gold-bright); }
 
-  /* Winning-hand highlight: applied directly to the board cards and the
-     winner's hole cards that made up their best hand — no separate box. */
   .sd-board-block{ margin-bottom:16px; }
   .sd-board-block .card-row{ justify-content:center; }
   .wc-label{ font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:.05em; color:var(--gold-bright);
@@ -299,7 +295,7 @@
 <div class="screen active" id="home">
   <div class="brandmark">♠</div>
   <h1>Hold'em Table</h1>
-  <div class="sub">Classic Texas Hold'em for 2–6. No servers, no accounts — one phone starts the table, everyone else connects with a short code.</div>
+  <div class="sub">Classic Texas Hold'em for 2–9. No servers, no accounts — one phone starts the table, everyone else connects with a short code.</div>
   <button class="stack-btn primary" onclick="goTo('host-connect');hostInitScreen();"><span>Start a table</span><span class="arrow">→</span></button>
   <button class="stack-btn" onclick="goTo('join-connect');resetJoinFlow();"><span>Join a table</span><span class="arrow">→</span></button>
   <div class="footnote">Connection happens phone-to-phone over the internet or same WiFi — share the code any way you like and you're at the table.</div>
@@ -318,14 +314,17 @@
   </div>
 
   <div class="step">
-    <div class="step-label">Number of players</div>
-    <p>How many total seats at the table, including you.</p>
-    <div class="slider-row">
+    <div class="step-label">Table Settings</div>
+    <p style="margin-bottom:8px;">Players (including you)</p>
+    <div class="slider-row" style="margin-bottom:16px;">
       <span class="mono" style="color:#9db8ab;font-size:12px;">2</span>
-      <input type="range" id="player-count-slider" min="2" max="6" step="1" value="2" oninput="onPlayerCountChange()">
-      <span class="mono" style="color:#9db8ab;font-size:12px;">6</span>
+      <input type="range" id="player-count-slider" min="2" max="9" step="1" value="2" oninput="onPlayerCountChange()">
+      <span class="mono" style="color:#9db8ab;font-size:12px;">9</span>
       <div class="slider-amt" id="player-count-label">2</div>
     </div>
+    
+    <p style="margin-bottom:8px;">Starting Stack</p>
+    <input type="number" class="text-field mono" id="host-starting-stack" value="1000" min="10" step="10">
   </div>
 
   <div class="step" style="text-align:center;">
@@ -393,6 +392,7 @@
     </div>
 
     <div class="me-zone">
+      <div id="my-combo-name" class="mono" style="color:var(--gold-bright); font-size:11px; text-transform:uppercase; letter-spacing:.05em; min-height:14px; opacity:0.8;"></div>
       <div class="my-cards-row" id="my-cards">
         <div class="card placeholder"></div>
         <div class="card placeholder"></div>
@@ -400,7 +400,7 @@
       <div class="player-tag" id="me-tag">
         <div class="avatar" id="me-avatar">?</div>
         <div><div class="name" id="me-name">You</div></div>
-        <div class="stack" id="me-stack">1000</div>
+        <div class="stack" id="me-stack">0</div>
         <div class="dealer-btn-inline" id="me-dealer" style="display:none;">D</div>
       </div>
     </div>
@@ -537,11 +537,31 @@ function best5of7(cards7){
 }
 function handName(score){ return HAND_NAMES[score[0]]; }
 
+// Helper function to evaluate combinations safely with fewer than 5 cards.
+function getCurrentComboName(hole, community){
+  if(!hole || hole.length === 0) return '';
+  let cards = [...hole, ...(community || [])];
+  
+  if(cards.length < 5){
+    const padSuits = ['p1','p2','p3'];
+    let padRanks = [-100, -200, -300];
+    
+    // Push dummy cards into the deck pool until we hit the requisite 5 cards required by our evaluator
+    // Using widely spaced negative numbers and completely unique dummy suits means they can never falsely bridge together into a standard Hand Combination (like a flush or a straight).
+    while(cards.length < 5){
+      cards.push({ r: padRanks.pop(), s: padSuits.pop() });
+    }
+  }
+  const res = best5of7(cards);
+  return handName(res.score);
+}
+
 /* ============================================================
    PEER-TO-PEER CONNECTING (short 6-digit codes)
    ============================================================ */
 const PEER_NS = 'huhold6-';
-const STARTING_STACK = 1000, SMALL_BLIND = 10, BIG_BLIND = 20;
+let STARTING_STACK = 1000;
+const SMALL_BLIND = 10, BIG_BLIND = 20;
 
 let peer = null;
 let isHost = false;
@@ -566,14 +586,14 @@ let chatUnread = 0;
 let seatPeerIds = [];
 let voiceRosterFromHost = [];
 let rawMicStream = null;
-let localStream = null;       // gain-processed mic audio — this IS what we send as our audio call's stream
+let localStream = null;
 let micGainNode = null;
 let micGainValue = 1;
-let camStream = null;         // raw camera video — this IS what we send as our video call's stream
+let camStream = null;
 let voiceEnabled = false;
 let camEnabled = false;
-let audioCalls = {};          // peerId -> MediaConnection (audio-only, fully independent of video)
-let videoCalls = {};          // peerId -> MediaConnection (video-only, fully independent of audio)
+let audioCalls = {};
+let videoCalls = {};
 let remoteAudioEls = {};
 let videoEls = {};
 let speakingSeats = new Set();
@@ -709,6 +729,9 @@ function hostBeginGame(){
   const typed = document.getElementById('host-name').value.trim();
   if(typed){ seatNames[0] = typed; myName = typed; }
   if(peer) seatPeerIds[0] = peer.id;
+  
+  STARTING_STACK = Number(document.getElementById('host-starting-stack').value) || 1000;
+
   gameStarted = true;
   goTo('table');
   startNewMatch(total);
@@ -903,7 +926,7 @@ function startHand(){
   const deck = shuffle(freshDeck());
   game.handNum++;
   game.deck = deck;
-  game.hole = allSeats().map(()=> [deck.pop(), deck.pop()]);
+  game.hole = allSeats().map(s => handSeats.includes(s) ? [deck.pop(), deck.pop()] : null);
   game.community = [];
   game.stage = 'preflop';
   game.contributions = new Array(game.n).fill(0);
@@ -1390,10 +1413,6 @@ async function _toggleVoiceImpl(){
     startSpeakingDetector('local', localStream);
     toast('Mic on');
   } else {
-    // Soft mute: stop sending our own audio, but leave existing connections
-    // (including any video call) open so we keep hearing/seeing anyone else
-    // who's still broadcasting, and they keep hearing/seeing us too if we're
-    // still on camera. This never touches the video call at all.
     voiceEnabled = false;
     if(rawMicStream){ try{ rawMicStream.getTracks().forEach(t=>t.stop()); }catch(e){} }
     rawMicStream = null;
@@ -1448,8 +1467,6 @@ async function _toggleCameraImpl(){
 }
 
 function connectAudioToAll(){
-  // Force-reconnect our AUDIO call to everyone. Only called for our own
-  // explicit mic toggle. Never touches video calls at all.
   if(!peer) return;
   if(isHost) seatPeerIds[0] = peer.id;
   if(!localStream) return;
@@ -1476,10 +1493,6 @@ function connectAudioToNewPeers(){
 }
 
 function connectVideoToAll(){
-  // Force-reconnect our VIDEO call to everyone. Only called for our own
-  // explicit camera toggle. Never touches audio calls at all — this is the
-  // actual fix: an audio-only reconnect can no longer drop anyone's video,
-  // because video was never part of that connection to begin with.
   if(!peer) return;
   if(isHost) seatPeerIds[0] = peer.id;
   if(!camStream) return;
@@ -1730,6 +1743,14 @@ function renderTable(){
 
   const isNewHand = v.handNum !== lastHandNumForDeal;
   if(isNewHand) lastCommunityCountForDeal = 0;
+  
+  // Set the live combo text based on current pocket + community card state
+  const myComboEl = document.getElementById('my-combo-name');
+  if(me.hole && !me.folded){
+    myComboEl.textContent = getCurrentComboName(me.hole, v.community);
+  } else {
+    myComboEl.textContent = '';
+  }
 
   const myCardsEl = document.getElementById('my-cards');
   myCardsEl.innerHTML='';
